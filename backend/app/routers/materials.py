@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -12,11 +14,14 @@ from fastapi.responses import FileResponse, Response
 from app import db
 from app.schemas import TranscriptIn
 from app.services import align as align_mod
+from app.services import audio as audio_mod
 from app.services import normalize
 
 router = APIRouter()
 
 _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+MAX_BATCH_FILES = 50
+_GENERATE_MODES = {"llm", "nouns"}
 
 
 def _get_material(conn, material_id: str):
@@ -80,6 +85,107 @@ async def create_material(
         payload["audio_url"] = audio_url
     job_id = await request.app.state.jobs_manager.create(payload)
     return {"job_id": job_id}
+
+
+@router.post("/materials/batch")
+async def create_materials_batch(
+    request: Request,
+    audios: list[UploadFile] | None = File(None),
+    name: str = Form(""),
+    mode: str = Form("nouns"),
+    blank_count: int = Form(10),
+    generate_sets: bool = Form(False),
+):
+    """Batch import: one material per audio, transcribed and stored.
+
+    Audio is streamed to ``data_dir/incoming`` before enqueueing, so the
+    request never buffers the whole batch in memory. By default only ASR +
+    storage run; ``generate_sets=true`` also creates a question set per file
+    (llm/nouns only).
+    """
+    files = [f for f in (audios or []) if f and f.filename]
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少选择一个音频文件")
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"单次最多 {MAX_BATCH_FILES} 个音频，请分批导入",
+        )
+    if generate_sets and mode not in _GENERATE_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail="批量出题仅支持 llm 或 nouns 模式",
+        )
+    for upload in files:
+        if not audio_mod.has_supported_ext(upload.filename):
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的音频格式：{upload.filename}",
+            )
+
+    data_dir = Path(request.app.state.data_dir)
+    batch_id = uuid.uuid4().hex[:12]
+    created = _now()
+    batch_name = name.strip() or (
+        f"批量导入 {datetime.now().strftime('%m-%d %H:%M')}"
+    )
+
+    staged: list[Path] = []
+    try:
+        for upload in files:
+            staged.append(await audio_mod.stage_upload(data_dir, upload))
+        with db._write_lock:
+            with request.app.state.conn:
+                request.app.state.conn.execute(
+                    "INSERT INTO batches(id,name,total,created_at,updated_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (batch_id, batch_name, len(files), created, created),
+                )
+        jobs: list[dict] = []
+        for position, (upload, path) in enumerate(zip(files, staged)):
+            filename = upload.filename or path.name
+            material_name = Path(filename).stem.strip() or "未命名材料"
+            job_id = await request.app.state.jobs_manager.create(
+                {
+                    "name": material_name,
+                    "source_type": "upload",
+                    "audio_path": str(path),
+                    "mode": mode if generate_sets else "none",
+                    "blank_count": blank_count,
+                    "generate": generate_sets,
+                    "data_dir": str(data_dir),
+                },
+                batch_id=batch_id,
+                file_name=filename,
+                position=position,
+            )
+            jobs.append({
+                "job_id": job_id,
+                "file_name": filename,
+                "name": material_name,
+                "position": position,
+            })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        for path in staged:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        with db._write_lock:
+            with request.app.state.conn:
+                request.app.state.conn.execute(
+                    "DELETE FROM jobs WHERE batch_id=?", (batch_id,)
+                )
+                request.app.state.conn.execute(
+                    "DELETE FROM batches WHERE id=?", (batch_id,)
+                )
+        raise HTTPException(
+            status_code=400, detail=f"批量导入失败：{exc}"
+        ) from exc
+
+    return {"batch_id": batch_id, "name": batch_name, "jobs": jobs}
 
 
 @router.get("/materials/{material_id}")

@@ -1,4 +1,4 @@
-"""SQLite storage layer (Task B1). Schema per design spec §5, user_version=1."""
+"""SQLite storage layer (Task B1). Schema per design spec §5, user_version=2."""
 from __future__ import annotations
 
 import json
@@ -81,12 +81,23 @@ CREATE TABLE IF NOT EXISTS translations(
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS batches(
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  total INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS jobs(
   id TEXT PRIMARY KEY,
   state TEXT NOT NULL,
   message TEXT,
   percent REAL,
   material_id TEXT,
+  batch_id TEXT,
+  file_name TEXT,
+  position INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -117,11 +128,38 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+# Columns added after v1. Existing databases only get CREATE TABLE IF NOT
+# EXISTS, so additive migrations are applied explicitly below.
+_JOB_COLUMNS = {
+    "batch_id": "TEXT",
+    "file_name": "TEXT",
+    "position": "INTEGER",
+}
+
+
+def _add_missing_columns(
+    conn: sqlite3.Connection, table: str, columns: dict[str, str]
+) -> None:
+    # PRAGMA table_info column 1 is the column name; use indices so this
+    # works on bare sqlite3 connections without a Row factory.
+    existing = {
+        row[1]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    for name, decl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     with _write_lock:
         with conn:
             conn.executescript(SCHEMA)
-            conn.execute("PRAGMA user_version=1")
+            _add_missing_columns(conn, "jobs", _JOB_COLUMNS)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_batch ON jobs(batch_id)"
+            )
+            conn.execute("PRAGMA user_version=2")
 
 
 def get_setting(conn: sqlite3.Connection, key: str) -> Any | None:

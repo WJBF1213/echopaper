@@ -230,6 +230,147 @@ async def test_manual_bracket_mode_ingest(tmp_db, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_batch_jobs_transcribe_and_store_each(tmp_db, tmp_path):
+    jm, engine = make_jm(tmp_db)
+    audio_a = tmp_path / "a.mp3"
+    audio_b = tmp_path / "b.mp3"
+    audio_a.write_bytes(b"ID3-a")
+    audio_b.write_bytes(b"ID3-b")
+    now = jobs_mod._now()
+    tmp_db.execute(
+        "INSERT INTO batches(id,name,total,created_at,updated_at)"
+        " VALUES('b1','Batch',2,?,?)",
+        (now, now),
+    )
+
+    async def enqueue(name, path, position):
+        return await jm.create(
+            {
+                "name": name,
+                "source_type": "upload",
+                "audio_path": str(path),
+                "blank_count": 0,
+                "mode": "none",
+                "generate": False,
+                "data_dir": tmp_path,
+            },
+            batch_id="b1",
+            file_name=f"{name}.mp3",
+            position=position,
+        )
+
+    j1 = await enqueue("one", audio_a, 0)
+    j2 = await enqueue("two", audio_b, 1)
+    jobs = await asyncio.gather(
+        _run_to_completion(jm, j1), _run_to_completion(jm, j2)
+    )
+
+    assert [j["state"] for j in jobs] == ["done", "done"]
+    assert len({j["material_id"] for j in jobs}) == 2
+    assert engine.acquired == 2 and engine.released == 2
+    # transcription-only: no sets were generated
+    assert tmp_db.execute(
+        "SELECT COUNT(*) c FROM question_sets").fetchone()["c"] == 0
+    # both audio files were adopted into data_dir/audio
+    assert len(list((tmp_path / "audio").glob("*"))) == 2
+    rows = tmp_db.execute(
+        "SELECT batch_id,file_name,position FROM jobs ORDER BY position"
+    ).fetchall()
+    assert [r["batch_id"] for r in rows] == ["b1", "b1"]
+    assert [r["file_name"] for r in rows] == ["one.mp3", "two.mp3"]
+
+
+@pytest.mark.asyncio
+async def test_batch_job_failure_does_not_block_siblings(tmp_db, tmp_path):
+    jm, _ = make_jm(tmp_db)
+    good = tmp_path / "good.mp3"
+    good.write_bytes(b"ID3-good")
+
+    j_bad = await jm.create(
+        {
+            "name": "bad",
+            "source_type": "upload",
+            "audio_path": str(tmp_path / "missing.mp3"),
+            "blank_count": 0,
+            "mode": "none",
+            "generate": False,
+            "data_dir": tmp_path,
+        },
+        batch_id="b2",
+        file_name="missing.mp3",
+        position=0,
+    )
+    j_good = await jm.create(
+        {
+            "name": "good",
+            "source_type": "upload",
+            "audio_path": str(good),
+            "blank_count": 0,
+            "mode": "none",
+            "generate": False,
+            "data_dir": tmp_path,
+        },
+        batch_id="b2",
+        file_name="good.mp3",
+        position=1,
+    )
+    bad, ok = await asyncio.gather(
+        _run_to_completion(jm, j_bad), _run_to_completion(jm, j_good)
+    )
+    assert bad["state"] == "error"
+    assert ok["state"] == "done" and ok["material_id"]
+    assert tmp_db.execute(
+        "SELECT COUNT(*) c FROM materials").fetchone()["c"] == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_transcription_cleans_adopted_audio(tmp_db, tmp_path):
+    class FailingEngine:
+        async def acquire(self):
+            def transcribe(path):
+                raise RuntimeError("asr exploded")
+
+            return SimpleNamespace(name="fake", transcribe=transcribe)
+
+        async def release(self):
+            pass
+
+    jm = JobManager(conn=tmp_db, engine_manager=FailingEngine(), data_dir=tmp_path)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3-fake")
+    job_id = await jm.create({
+        "name": "Broken",
+        "source_type": "upload",
+        "audio_path": str(audio),
+        "blank_count": 0,
+        "mode": "none",
+        "generate": False,
+        "data_dir": tmp_path,
+    })
+    job = await _run_to_completion(jm, job_id)
+    assert job["state"] == "error"
+    assert list((tmp_path / "audio").glob("*")) == []
+    assert tmp_db.execute(
+        "SELECT COUNT(*) c FROM materials").fetchone()["c"] == 0
+
+
+def test_reconcile_interrupted_marks_stale_jobs(tmp_db):
+    now = jobs_mod._now()
+    tmp_db.executemany(
+        "INSERT INTO jobs(id,state,percent,created_at,updated_at)"
+        " VALUES(?,?,?,?,?)",
+        [("j1", "transcribing", 30.0, now, now),
+         ("j2", "done", 100.0, now, now)],
+    )
+    count = jobs_mod.reconcile_interrupted(tmp_db)
+    assert count == 1
+    rows = {r["id"]: r for r in tmp_db.execute("SELECT * FROM jobs")}
+    assert rows["j1"]["state"] == "error"
+    assert "重启" in rows["j1"]["message"]
+    assert rows["j2"]["state"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_llm_mode_generates_set(tmp_db, tmp_path, monkeypatch):
     from app.services import question_gen
 

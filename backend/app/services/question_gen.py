@@ -44,11 +44,20 @@ ITEMS_SCHEMA = {
 }
 
 SYSTEM_PROMPT = (
-    "你是雅思听力填空题命题专家。根据带词索引的转写文本选择挖空词跨度。"
-    "规则：名词优先（真实考试约九成答案为名词）；数字与姓名适合 Section 1；"
-    "每空 1-3 个词；相邻空之间至少间隔 5 个词；按文本顺序选择；"
-    "避免上下文过于可猜的词；答案必须是原文逐字连续片段，不得改写。"
-    "只返回 JSON 对象。"
+    "你是雅思听力填空题（sentence / note completion）命题专家。"
+    "输入是带词索引的转写文本，你要选出值得考的挖空跨度。\n"
+    "命题规则：\n"
+    "1. 答案必须是转写原文中逐字连续的一段，不得改写、翻译、缩写或补全。\n"
+    "2. 每个空 1-3 个词；整段只用一个词数上限，因此不要超过 3 词。\n"
+    "3. 名词或名词短语优先；数字、时间、价格、邮编、电话号码是优质答案。\n"
+    "4. 专有名词（人名、地名、机构名）只有在原文中已逐字母拼读时才可以选；"
+    "未拼读的专有名词一律不要选。\n"
+    "5. 相邻两个空之间至少间隔 5 个词，且按原文顺序排列。\n"
+    "6. 不要选：每句开头两个词、问候或告别用语、以及紧挨着取值被直接写出的标签词"
+    "（例如 \"The postcode is GU7 4BX\" 中不要选 postcode，应选 GU7 4BX）。\n"
+    "7. 不要选仅凭上下文就能猜出的词（固定搭配的另一半、被相邻词直接提示的词）。\n"
+    "8. 优先选择需要听懂具体信息才能填对的位置，而不是语法功能词。\n"
+    "只返回 JSON 对象，不要任何解释性文字。"
 )
 
 
@@ -161,6 +170,29 @@ def _cfg_value(cfg: Any, key: str, default=None):
     return getattr(cfg, key, default)
 
 
+def _candidate_hint(
+    words_json: list[dict],
+    candidates: list[dict],
+    a: int,
+    b: int,
+) -> str:
+    """Render candidates as ``i0-i1 "text" (type)`` so phrase spans are visible.
+
+    A bare start index hides that "railway station" is a two-word candidate;
+    the model would then blank only "railway" and the validator drops it.
+    """
+    rows: list[str] = []
+    for cand in candidates:
+        i0 = cand["i0"]
+        i1 = cand.get("i1", i0)
+        if not (a <= i0 and i1 <= b):
+            continue
+        text = " ".join(words_json[k]["w"] for k in range(i0, i1 + 1))
+        span = f"{i0}" if i0 == i1 else f"{i0}-{i1}"
+        rows.append(f'{span} "{text}" ({cand.get("type", "noun")})')
+    return "\n".join(rows) if rows else "（无）"
+
+
 def _user_prompt(
     words_json: list[dict],
     a: int,
@@ -171,13 +203,13 @@ def _user_prompt(
     lines = " ".join(
         f"{i}:{words_json[i]['w']}" for i in range(a, b + 1)
     )
-    cand_hint = ", ".join(
-        str(c["i0"]) for c in candidates if a <= c["i0"] <= b
-    )
+    cand_hint = _candidate_hint(words_json, candidates, a, b)
     return (
         f"文本词索引 {a} 到 {b}（含）：\n{lines}\n\n"
-        f"候选词索引提示：{cand_hint or '无'}\n\n"
-        f"请选择恰好 {quota} 个挖空跨度，返回 JSON："
+        f"已通过规则预筛的候选（索引 原文 类型）：\n{cand_hint}\n\n"
+        f"请选择恰好 {quota} 个挖空，优先从上面的候选中选，也可以选候选之外的跨度，"
+        "但必须满足系统提示里的全部规则。\n"
+        "返回 JSON："
         '{"items":[{"i0":起词索引,"i1":止词索引,'
         '"answer":"原文逐字答案","type":"noun|number|name|verb|adj",'
         '"reason":"简短理由"}]}'
@@ -275,15 +307,108 @@ def _to_blank(item: dict, words_json: list[dict], position: int) -> Blank:
     i0, i1 = item["i0"], item["i1"]
     return Blank(
         position=position,
-        answer=_span_answer(words_json, i0, i1),
-        alternatives=[],
+        # A spelled-out answer overrides the raw span ("S-A-R-A-H" -> "Sarah").
+        answer=item.get("answer") or _span_answer(words_json, i0, i1),
+        alternatives=list(item.get("alternatives") or []),
         word_start=i0,
         word_end=i1,
         t_start=float(words_json[i0].get("s", 0.0)),
         t_end=float(words_json[i1].get("e", 0.0)),
         type=item.get("type") or "noun",
-        word_limit=derive_word_limit(i1 - i0 + 1),
+        word_limit=item.get("word_limit") or derive_word_limit(i1 - i0 + 1),
     )
+
+
+def select_fallback(
+    candidates: list[dict],
+    taken: list[dict],
+    limit: int,
+) -> list[dict]:
+    """Pick up to ``limit`` extra candidates under the gap constraint.
+
+    Candidates arrive ranked by quality (``score``). A greedy rank scan can
+    take a high-scoring word that blocks two slightly lower ones; the best
+    set is a maximum-weight independent set over word intervals with a
+    minimum gap. Solved exactly with weighted interval scheduling in O(n*k).
+    """
+    if limit <= 0 or not candidates:
+        return []
+
+    taken_ranges = [
+        (int(it["i0"]), int(it.get("i1", it["i0"]))) for it in taken
+    ]
+
+    def conflicts(i0: int, i1: int) -> bool:
+        return any(
+            i0 <= b + MIN_GAP_WORDS and i1 >= a - MIN_GAP_WORDS
+            for a, b in taken_ranges
+        )
+
+    items: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+    for cand in candidates:
+        i0 = int(cand["i0"])
+        i1 = int(cand.get("i1", i0))
+        key = (i0, i1)
+        if key in seen or conflicts(i0, i1):
+            continue
+        seen.add(key)
+        items.append(
+            {
+                **cand,
+                "i0": i0,
+                "i1": i1,
+                "_w": int(cand.get("score", 0)),
+            }
+        )
+    if not items:
+        return []
+
+    # Weighted interval scheduling needs items ordered by end position.
+    items.sort(key=lambda c: (c["i1"], c["i0"]))
+    count = len(items)
+    prev = [-1] * count
+    for i in range(count):
+        threshold = items[i]["i0"] - MIN_GAP_WORDS - 1
+        lo, hi, best = 0, i, -1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if items[mid]["i1"] <= threshold:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid
+        prev[i] = best
+
+    neg = -(10**9)
+    best_value = [[neg] * (limit + 1) for _ in range(count + 1)]
+    best_value[0][0] = 0
+    for i in range(1, count + 1):
+        item = items[i - 1]
+        p = prev[i - 1]
+        for k in range(limit + 1):
+            value = best_value[i - 1][k]
+            if k > 0:
+                sub = best_value[p + 1][k - 1]
+                if sub > neg:
+                    value = max(value, sub + item["_w"])
+            best_value[i][k] = value
+
+    # Prefer filling the requested quota, then the highest total score.
+    picks = max(k for k in range(limit + 1) if best_value[count][k] > neg)
+    chosen: list[dict] = []
+    i, k = count, picks
+    while i > 0 and k > 0:
+        item = items[i - 1]
+        p = prev[i - 1]
+        sub = best_value[p + 1][k - 1]
+        if sub > neg and best_value[i][k] == sub + item["_w"]:
+            chosen.append(item)
+            i, k = p + 1, k - 1
+        else:
+            i -= 1
+    chosen.reverse()
+    return chosen
 
 
 async def generate_set(
@@ -352,26 +477,22 @@ async def generate_set(
     if merged:
         used_llm = True
 
-    # fallback fill from the candidate pool
-    if len(merged) < blank_count:
-        taken_starts = {it["i0"] for it in merged}
-        last_ends = sorted({it["i1"] for it in merged})
-        for cand in candidates:
-            if len(merged) >= blank_count:
-                break
-            i0 = cand["i0"]
-            if i0 in taken_starts:
-                continue
-            conflict = False
-            for it in merged:
-                if i0 >= it["i0"] - MIN_GAP_WORDS and i0 <= it["i1"] + MIN_GAP_WORDS:
-                    conflict = True
-                    break
-            if conflict:
-                continue
-            merged.append({"i0": i0, "i1": cand["i1"], "answer": None,
-                           "type": cand["type"]})
-            taken_starts.add(i0)
+    # fallback fill from the candidate pool (max-weight set under the gap
+    # constraint, not a greedy rank scan — see select_fallback)
+    shortfall = blank_count - len(merged)
+    if shortfall > 0:
+        picked = select_fallback(candidates, merged, shortfall)
+        for cand in picked:
+            merged.append(
+                {
+                    "i0": cand["i0"],
+                    "i1": cand["i1"],
+                    "answer": cand.get("answer"),
+                    "type": cand["type"],
+                    "alternatives": cand.get("alternatives"),
+                    "word_limit": cand.get("word_limit"),
+                }
+            )
         merged = _enforce_global(merged, blank_count)
 
     if not merged:

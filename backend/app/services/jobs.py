@@ -136,17 +136,34 @@ class JobManager:
         return dict(row) if row else None
 
     # ------------------------------------------------------------- creation
-    async def create(self, payload: dict) -> str:
+    async def create(
+        self,
+        payload: dict,
+        *,
+        batch_id: str | None = None,
+        file_name: str | None = None,
+        position: int | None = None,
+    ) -> str:
         if self.conn is None:
             raise RuntimeError("JobManager 未绑定数据库连接")
         job_id = _uid()
+        created = _now()
         with db._write_lock:
             with self.conn:
                 self.conn.execute(
                     "INSERT INTO jobs(id,state,message,percent,material_id,"
-                    "created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                    (job_id, "queued", None, 0.0, None, _now(), _now()),
+                    "batch_id,file_name,position,created_at,updated_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        job_id, "queued", None, 0.0, None,
+                        batch_id, file_name, position, created, created,
+                    ),
                 )
+                if batch_id is not None:
+                    self.conn.execute(
+                        "UPDATE batches SET updated_at=? WHERE id=?",
+                        (created, batch_id),
+                    )
         task = asyncio.create_task(self._run(job_id, dict(payload)))
         self._tasks[job_id] = task
         return job_id
@@ -156,7 +173,32 @@ class JobManager:
         try:
             await self._pipeline(job_id, p)
         except Exception as exc:  # noqa: BLE001 - job must never crash app
+            # Clean up first so observers of state=error see the final disk state.
+            await self._cleanup_orphan_audio(job_id, p)
             self._update(job_id, state="error", message=f"{type(exc).__name__}: {exc}")
+
+    async def _cleanup_orphan_audio(self, job_id: str, p: dict) -> None:
+        """Remove staged/adopted audio when the material was never stored."""
+        job = self.get(job_id)
+        if job and job.get("material_id"):
+            return
+        for key in ("audio_path", "staged_path"):
+            value = p.get(key)
+            if not value:
+                continue
+            path = Path(value)
+            # A material row always owns its audio, even if the job row
+            # has not been updated yet.
+            owned = self.conn.execute(
+                "SELECT 1 FROM materials WHERE audio_path=? LIMIT 1",
+                (str(path),),
+            ).fetchone()
+            if owned or not path.is_file():
+                continue
+            try:
+                await asyncio.to_thread(path.unlink)
+            except OSError:
+                pass
 
     async def _pipeline(self, job_id: str, p: dict) -> None:
         data_dir = Path(p.get("data_dir") or self.data_dir or "data")
@@ -173,6 +215,9 @@ class JobManager:
         # -- stage 1: obtain audio ------------------------------------------------
         audio_path: Path | None = None
         duration: float | None = None
+        # The staged path is replaced once the file is adopted into data/audio;
+        # keep it so an early failure can still clean up the upload.
+        p.setdefault("staged_path", p.get("audio_path"))
         if p.get("audio_url") and not p.get("audio_path"):
             self._update(job_id, state="downloading", percent=5,
                          message="下载音频")
@@ -189,6 +234,8 @@ class JobManager:
                 data_dir, filename=p.get("audio_filename"),
                 data=p["audio_bytes"],
             )
+        # Point cleanup at wherever the audio actually lives now.
+        p["audio_path"] = str(audio_path) if audio_path else None
 
         # -- stage 2: words (ASR / align / manual) ---------------------------------
         if audio_path is not None:
@@ -247,6 +294,13 @@ class JobManager:
                         created, created,
                     ),
                 )
+        # Batch imports default to transcription + storage only; question
+        # sets are generated later from the material page.
+        if not p.get("generate", True):
+            self._update(job_id, state="done", percent=100.0,
+                         message=note, material_id=material_id)
+            return
+
         self._update(job_id, state="generating", percent=75,
                      message="生成题目", material_id=material_id)
 
@@ -270,7 +324,7 @@ class JobManager:
     async def _adopt_audio(self, data_dir: Path, src: Path) -> tuple[Path, float | None]:
         """Move an uploaded temp file into data_dir/audio for safekeeping."""
         audio_dir = Path(data_dir) / "audio"
-        await asyncio.to_thread(audio_dir.mkdir, True, True)
+        await asyncio.to_thread(audio_dir.mkdir, parents=True, exist_ok=True)
         dst = audio_dir / f"{_uid()}{src.suffix.lower() or '.mp3'}"
         await asyncio.to_thread(shutil.move, str(src), str(dst))
         duration = await asyncio.to_thread(audio_mod.probe_duration, dst)
@@ -293,6 +347,23 @@ class JobManager:
 
     def _manual_blanks(self, manual_items, words):  # deprecated shim
         return manual_blanks(manual_items, words)
+
+
+def reconcile_interrupted(conn) -> int:
+    """Mark jobs left mid-flight by a previous process as failed.
+
+    Tasks live only in memory: after a restart their rows would otherwise
+    stay "transcribing" forever and a batch would look permanently active.
+    """
+    with db._write_lock:
+        with conn:
+            cur = conn.execute(
+                "UPDATE jobs SET state='error',"
+                " message=COALESCE(message, '服务重启，任务已中断，请重新导入'),"
+                " updated_at=? WHERE state NOT IN ('done','error')",
+                (_now(),),
+            )
+    return cur.rowcount
 
 
 #: process-wide singleton; app startup wires conn/engine/llm (B12)

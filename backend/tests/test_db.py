@@ -16,10 +16,48 @@ def test_init_db_creates_tables_and_version(tmp_db):
         "attempt_items",
         "settings",
         "translations",
+        "batches",
         "jobs",
     }
     assert expected <= tables
-    assert tmp_db.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert tmp_db.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_jobs_has_batch_columns(tmp_db):
+    cols = {r["name"] for r in tmp_db.execute("PRAGMA table_info(jobs)")}
+    assert {"batch_id", "file_name", "position"} <= cols
+
+
+def test_init_db_migrates_v1_jobs_table(tmp_path):
+    """Old databases predate batch columns; init_db adds them in place."""
+    import sqlite3
+
+    from app import db
+
+    conn = sqlite3.connect(tmp_path / "old.db")
+    conn.executescript(
+        """
+        CREATE TABLE jobs(
+          id TEXT PRIMARY KEY,
+          state TEXT NOT NULL,
+          message TEXT,
+          percent REAL,
+          material_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO jobs(id,state,created_at,updated_at)
+        VALUES('j1','done','2026-01-01','2026-01-01');
+        """
+    )
+    try:
+        db.init_db(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
+        assert {"batch_id", "file_name", "position"} <= cols
+        assert conn.execute("SELECT state FROM jobs WHERE id='j1'").fetchone()[0] == "done"
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    finally:
+        conn.close()
 
 
 def test_wal_mode_and_row_factory(tmp_path):

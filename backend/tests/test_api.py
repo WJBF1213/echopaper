@@ -43,13 +43,15 @@ class FakeEngineManager:
 class FakeJobs:
     def __init__(self):
         self.payload = None
+        self.calls: list[dict] = []
 
     def configure(self, **kw):
         pass
 
-    async def create(self, payload):
+    async def create(self, payload, **kw):
         self.payload = payload
-        return "job-123"
+        self.calls.append({"payload": payload, **kw})
+        return "job-123" if len(self.calls) == 1 else f"job-{len(self.calls)}"
 
     def get(self, job_id):
         return {"id": job_id, "state": "done", "percent": 100.0,
@@ -138,6 +140,104 @@ def test_create_material_job_flow(app, client, tmp_path):
 def test_create_material_requires_source(client):
     r = client.post("/api/materials", data={"name": "Empty"})
     assert r.status_code == 400
+
+
+def test_create_materials_batch(app, client, tmp_path):
+    r = client.post(
+        "/api/materials/batch",
+        data={"name": "Batch A"},
+        files=[
+            ("audios", ("one.mp3", b"one-bytes", "audio/mpeg")),
+            ("audios", ("two.m4a", b"two-bytes", "audio/mp4")),
+        ],
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "Batch A"
+    assert [j["file_name"] for j in body["jobs"]] == ["one.mp3", "two.m4a"]
+    assert [j["name"] for j in body["jobs"]] == ["one", "two"]
+    assert len(app.state.test_jobs.calls) == 2
+
+    first = app.state.test_jobs.calls[0]
+    assert first["batch_id"] == body["batch_id"]
+    assert first["position"] == 0
+    assert first["payload"]["generate"] is False
+    assert first["payload"]["mode"] == "none"
+    assert first["payload"]["source_type"] == "upload"
+    assert Path(first["payload"]["audio_path"]).read_bytes() == b"one-bytes"
+
+    batch = app.state.conn.execute(
+        "SELECT * FROM batches WHERE id=?", (body["batch_id"],)
+    ).fetchone()
+    assert batch["name"] == "Batch A" and batch["total"] == 2
+
+
+def test_create_materials_batch_can_generate_sets(app, client):
+    r = client.post(
+        "/api/materials/batch",
+        data={"name": "With sets", "mode": "llm", "blank_count": "8",
+              "generate_sets": "true"},
+        files=[("audios", ("lesson.mp3", b"x", "audio/mpeg"))],
+    )
+    assert r.status_code == 200, r.text
+    payload = app.state.test_jobs.calls[0]["payload"]
+    assert payload["generate"] is True
+    assert payload["mode"] == "llm"
+    assert payload["blank_count"] == 8
+
+
+def test_create_materials_batch_validation(client):
+    r = client.post("/api/materials/batch", data={"name": "Empty"})
+    assert r.status_code == 400
+
+    bad_ext = client.post(
+        "/api/materials/batch",
+        files=[("audios", ("notes.txt", b"x", "text/plain"))],
+    )
+    assert bad_ext.status_code == 400
+    assert "不支持" in bad_ext.json()["detail"]
+
+    bad_mode = client.post(
+        "/api/materials/batch",
+        data={"mode": "manual", "generate_sets": "true"},
+        files=[("audios", ("a.mp3", b"x", "audio/mpeg"))],
+    )
+    assert bad_mode.status_code == 400
+
+
+def test_batch_status_and_list(tmp_db, client):
+    from app.services.jobs import _uid, _now
+
+    now = _now()
+    tmp_db.execute(
+        "INSERT INTO batches(id,name,total,created_at,updated_at)"
+        " VALUES('b1','Batch',3,?,?)",
+        (now, now),
+    )
+    rows = [("done", 100.0, "m1"), ("error", 30.0, None),
+            ("transcribing", 30.0, None)]
+    for i, (state, pct, mid) in enumerate(rows):
+        tmp_db.execute(
+            "INSERT INTO jobs(id,state,message,percent,material_id,batch_id,"
+            "file_name,position,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,'b1',?,?,?,?)",
+            (_uid(), state, None, pct, mid, f"{i}.mp3", i, now, now),
+        )
+    r = client.get("/api/batches/b1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 3
+    assert body["done"] == 1 and body["error"] == 1 and body["running"] == 1
+    assert body["percent"] == 76.7
+    assert [j["file_name"] for j in body["jobs"]] == ["0.mp3", "1.mp3", "2.mp3"]
+
+    listed = client.get("/api/batches")
+    assert listed.status_code == 200
+    items = listed.json()
+    assert len(items) == 1
+    assert items[0]["id"] == "b1" and items[0]["running"] == 1
+
+    assert client.get("/api/batches/nope").status_code == 404
 
 
 def test_materials_list_with_stats(tmp_db, client):

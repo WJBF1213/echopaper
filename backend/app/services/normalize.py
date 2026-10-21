@@ -111,13 +111,14 @@ def _split_long(start: int, end: int, commas: list[int]) -> list[list[int]]:
 
 
 def words_to_text(words: list[dict], sentences: list[list[int]] | None = None) -> str:
-    """Rebuild readable text: spaces between words, '.' at sentence ends."""
+    """Rebuild readable text: spaces between words, no space before '. '."""
     if sentences is None:
         return " ".join(x["w"] for x in words)
     ends = {e for _, e in sentences}
     parts: list[str] = []
     for i, w in enumerate(words):
-        parts.append(w["w"])
+        token = w["w"]
         if i in ends:
-            parts.append(".")
+            token += "."
+        parts.append(token)
     return " ".join(parts)

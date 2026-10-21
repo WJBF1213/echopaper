@@ -168,6 +168,100 @@ async def test_llm_total_failure_falls_back():
     assert len(result.blanks) == 2
 
 
+def test_prompts_encode_current_item_rules():
+    """The prompt must match the candidate pool and the name/spelling rule."""
+    system = qg.SYSTEM_PROMPT
+    # Names are only allowed when the audio spells them.
+    assert "拼读" in system
+    assert "未拼读的专有名词一律不要选" in system
+    # The old, now-wrong advice must be gone.
+    assert "数字与姓名适合" not in system
+    # Hard exclusions the validator enforces.
+    for phrase in ("开头两个词", "问候", "标签"):
+        assert phrase in system
+    assert "5 个词" in system
+
+    words = [
+        {"w": "The", "s": 0, "e": 0.1},
+        {"w": "hotel", "s": 0.2, "e": 0.5},
+        {"w": "near", "s": 0.6, "e": 0.8},
+        {"w": "the", "s": 0.9, "e": 1.0},
+        {"w": "railway", "s": 1.1, "e": 1.4},
+        {"w": "station", "s": 1.5, "e": 1.8},
+    ]
+    candidates = [
+        {"i0": 4, "i1": 5, "type": "noun", "score": 62},
+        {"i0": 1, "i1": 1, "type": "noun", "score": 30},
+    ]
+    prompt = qg._user_prompt(words, 0, 5, candidates, 1)
+    # Phrase spans are rendered with both bounds and their text.
+    assert '4-5 "railway station" (noun)' in prompt
+    assert '1 "hotel" (noun)' in prompt
+    # Quota and the JSON contract stay explicit.
+    assert "恰好 1 个" in prompt
+    assert '"i0"' in prompt and '"i1"' in prompt
+
+
+def test_candidate_hint_excludes_out_of_range_spans():
+    words = [{"w": w, "s": 0, "e": 0} for w in "a b c d e".split()]
+    candidates = [
+        {"i0": 1, "i1": 2, "type": "noun", "score": 30},
+        {"i0": 6, "i1": 7, "type": "noun", "score": 30},  # beyond range b=4
+    ]
+    hint = qg._candidate_hint(words, candidates, 0, 4)
+    assert '1-2 "b c"' in hint
+    assert "6-7" not in hint
+
+
+def test_fallback_prefers_higher_ranked_compatible_pair():
+    candidates = [
+        {"i0": 10, "i1": 10, "type": "noun"},  # rank 1, conflicts with #2/#3
+        {"i0": 5, "i1": 5, "type": "noun"},    # rank 2, compatible with #3
+        {"i0": 15, "i1": 15, "type": "noun"},  # rank 3, compatible with #2
+    ]
+    picked = qg.select_fallback(candidates, [], 2)
+    assert [c["i0"] for c in picked] == [5, 15]
+
+
+def test_fallback_respects_existing_blanks():
+    candidates = [
+        {"i0": 4, "i1": 4, "type": "noun"},
+        {"i0": 5, "i1": 5, "type": "noun"},   # conflicts with the taken blank
+        {"i0": 20, "i1": 20, "type": "noun"},
+    ]
+    picked = qg.select_fallback(candidates, [{"i0": 10, "i1": 10}], 2)
+    assert [c["i0"] for c in picked] == [4, 20]
+
+
+@pytest.mark.asyncio
+async def test_fallback_does_not_drop_nouns_for_verbs():
+    """Regression for the live demo: a verb must not displace a noun."""
+    words = (
+        "Good morning my name is Sarah and I would like to book a room "
+        "for the weekend the hotel is located near the railway station "
+        "and offers breakfast"
+    ).split()
+    wj = _wj(words)
+    sents = [[0, len(words) - 1]]
+
+    def fake_tags(_words):
+        tags = [[] for _ in words]
+        for i, w in enumerate(words):
+            if w in ("morning", "name", "room", "weekend", "hotel",
+                     "railway", "station", "breakfast"):
+                tags[i] = ["NOUN"]
+            elif w == "like":
+                tags[i] = ["VERB"]
+        return tags
+
+    result = await generate_set(
+        wj, sents, 3, llm_cfg=None, tag_words_fn=fake_tags
+    )
+    answers = {b.answer for b in result.blanks}
+    assert "like" not in answers
+    assert len(answers) == 3
+
+
 @pytest.mark.asyncio
 async def test_blank_fields_derived():
     wj = _wj(WORDS)

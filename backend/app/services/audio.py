@@ -32,6 +32,53 @@ def _ext_for(filename: str | None = None, url: str | None = None) -> str:
     return ".mp3"
 
 
+def has_supported_ext(filename: str | None) -> bool:
+    """True when the name has no extension or a recognised audio extension."""
+    suffix = Path(filename or "").suffix.lower()
+    return not suffix or suffix in ALLOWED_EXTS
+
+
+def _copy_stream(src, path: Path) -> None:
+    with path.open("wb") as fh:
+        shutil.copyfileobj(src, fh, 1 << 20)
+
+
+def cleanup_incoming(data_dir: Path) -> int:
+    """Drop staged uploads orphaned by a restart (no tasks survive it)."""
+    incoming = Path(data_dir) / "incoming"
+    if not incoming.is_dir():
+        return 0
+    removed = 0
+    for path in incoming.iterdir():
+        if not path.is_file():
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+async def stage_upload(data_dir: Path, upload) -> Path:
+    """Stream a multipart upload into ``data_dir/incoming`` (never RAM).
+
+    The job pipeline adopts the staged file into ``data_dir/audio`` when it
+    starts, so a large batch only holds one upload's bytes at a time.
+    """
+    incoming = Path(data_dir) / "incoming"
+    await asyncio.to_thread(incoming.mkdir, parents=True, exist_ok=True)
+    ext = _ext_for(getattr(upload, "filename", None))
+    path = incoming / f"{uuid.uuid4().hex}{ext}"
+    try:
+        await upload.seek(0)
+        await asyncio.to_thread(_copy_stream, upload.file, path)
+    except Exception:
+        await asyncio.to_thread(path.unlink, True)
+        raise
+    return path
+
+
 async def save_upload(
     data_dir: Path,
     *,
@@ -41,7 +88,7 @@ async def save_upload(
 ) -> tuple[Path, float | None]:
     """Persist audio (bytes or URL download) -> (path, duration_s|None)."""
     audio_dir = Path(data_dir) / "audio"
-    await asyncio.to_thread(audio_dir.mkdir, True, True)
+    await asyncio.to_thread(audio_dir.mkdir, parents=True, exist_ok=True)
     ext = _ext_for(filename, url)
     path = audio_dir / f"{uuid.uuid4().hex}{ext}"
     try:

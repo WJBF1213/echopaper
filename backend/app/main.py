@@ -19,6 +19,7 @@ from app.config import REPO_ROOT, load_settings
 from app.routers import (
     asr as asr_router,
     attempts as attempts_router,
+    batches as batches_router,
     health as health_router,
     materials as materials_router,
     review as review_router,
@@ -82,6 +83,10 @@ def create_app(
         llm_cfg_fn=llm_cfg,
         data_dir=data_dir,
     )
+    jobs_svc.reconcile_interrupted(conn)
+    from app.services import audio as audio_svc
+
+    audio_svc.cleanup_incoming(data_dir)
     translate_svc.configure(conn)
 
     app = FastAPI(
@@ -100,6 +105,7 @@ def create_app(
     app.include_router(settings_router.router, prefix="/api")
     app.include_router(asr_router.router, prefix="/api")
     app.include_router(materials_router.router, prefix="/api")
+    app.include_router(batches_router.router, prefix="/api")
     app.include_router(sets_router.router, prefix="/api")
     app.include_router(attempts_router.router, prefix="/api")
     app.include_router(review_router.router, prefix="/api")

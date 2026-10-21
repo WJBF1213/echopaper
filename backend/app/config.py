@@ -19,6 +19,8 @@ _ENV_KEYS = {
     "HF_ENDPOINT": ("hf_endpoint", str),
     "PIP_INDEX_URL": ("pip_index_url", str),
     "ASR_ENGINE": ("asr.engine", str),
+    "ASR_PARAKEET_MODEL": ("asr.parakeet_model", str),
+    "ASR_WHISPER_MODEL": ("asr.whisper_model", str),
     "PARAKEET_MODEL": ("asr.parakeet_model", str),
     "WHISPER_MODEL": ("asr.whisper_model", str),
     "ASR_IDLE_UNLOAD_MIN": ("asr.idle_unload_min", int),

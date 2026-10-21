@@ -4,7 +4,8 @@
 cd "$(dirname "$0")"
 
 PY=python3
-PORT="${LUTE_PRACTICE_PORT:-8300}"
+PORT="${PORT:-8300}"
+export PORT
 VENV=.venv
 
 # 1) Python 检查（需 3.10+）

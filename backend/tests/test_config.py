@@ -6,8 +6,9 @@ def _clear_env(monkeypatch):
     for key in (
         "PORT", "DATA_DIR", "HF_HOME", "HF_ENDPOINT", "PIP_INDEX_URL",
         "ASR_ENGINE", "PARAKEET_MODEL", "WHISPER_MODEL", "ASR_IDLE_UNLOAD_MIN",
+        "ASR_PARAKEET_MODEL", "ASR_WHISPER_MODEL",
         "LLM_PROVIDER", "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY",
-        "GEN_BLANK_COUNT",
+        "LLM_MAX_CONTEXT_TOKENS", "GEN_BLANK_COUNT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -66,3 +67,21 @@ def test_load_settings_process_env_beats_dotenv(tmp_path, monkeypatch):
 
     s = config.load_settings(env_file=env_file)
     assert s.asr.engine == "parakeet"
+
+
+def test_launcher_env_keys_are_recognized(tmp_path, monkeypatch):
+    """The launcher writes ASR_PARAKEET_MODEL / ASR_WHISPER_MODEL; the
+    canonical keys must win when both are present."""
+    _clear_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "ASR_PARAKEET_MODEL=legacy/parakeet\n"
+        "ASR_WHISPER_MODEL=legacy/whisper\n"
+        "PARAKEET_MODEL=canonical/parakeet\n",
+        encoding="utf-8",
+    )
+    from app import config
+
+    s = config.load_settings(env_file=env_file)
+    assert s.asr.parakeet_model == "canonical/parakeet"
+    assert s.asr.whisper_model == "legacy/whisper"
