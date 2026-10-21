@@ -39,6 +39,54 @@ def _pseudo_words(text: str) -> tuple[list[dict], list[list[int]]]:
     return normalize.build_words_segments(raw)
 
 
+def manual_blanks(manual_items: list[dict], words: list[dict]) -> list:
+    """Anchor parsed bracket items onto words -> Blank list."""
+    from app.services.question_gen import Blank, derive_word_limit
+
+    anchored = anchor_manual(manual_items, words)
+    blanks = []
+    for position, a in enumerate(anchored, start=1):
+        i0, i1 = a["i0"], a["i1"]
+        blanks.append(
+            Blank(
+                position=position,
+                answer=a["answer"],
+                word_start=i0,
+                word_end=i1,
+                t_start=float(words[i0].get("s", 0.0)),
+                t_end=float(words[i1].get("e", 0.0)),
+                type="noun",
+                word_limit=derive_word_limit(i1 - i0 + 1),
+            )
+        )
+    return blanks
+
+
+def persist_set(conn, material_id: str, mode: str, blanks: list) -> str:
+    """Insert a question_set row plus its blanks; returns set id."""
+    set_id = _uid()
+    with db._write_lock:
+        with conn:
+            conn.execute(
+                "INSERT INTO question_sets(id,material_id,mode,blank_count,"
+                "params_json,stale,created_at) VALUES(?,?,?,?,?,?,?)",
+                (set_id, material_id, mode, len(blanks), "{}", 0, _now()),
+            )
+            for b in blanks:
+                conn.execute(
+                    "INSERT INTO blanks(id,set_id,position,answer,"
+                    "alternatives_json,word_start,word_end,t_start,t_end,"
+                    "type,word_limit) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        _uid(), set_id, b.position, b.answer,
+                        json.dumps(getattr(b, "alternatives", []) or []),
+                        b.word_start, b.word_end, b.t_start, b.t_end,
+                        b.type, b.word_limit,
+                    ),
+                )
+    return set_id
+
+
 class JobManager:
     def __init__(
         self,
@@ -204,7 +252,7 @@ class JobManager:
 
         # -- stage 4: question set --------------------------------------------------
         if mode == "manual":
-            blanks = self._manual_blanks(manual_items, words)
+            blanks = manual_blanks(manual_items, words)
             set_mode = "manual"
         else:
             cfg = self.llm_cfg_fn() if mode == "llm" else None
@@ -213,7 +261,7 @@ class JobManager:
             )
             blanks = generated.blanks
             set_mode = mode
-        self._persist_set(material_id, set_mode, blanks)
+        persist_set(self.conn, material_id, set_mode, blanks)
 
         self._update(job_id, state="done", percent=100.0,
                      message=note, material_id=material_id)
@@ -243,49 +291,8 @@ class JobManager:
         else:
             await self.engine.release()
 
-    def _manual_blanks(self, manual_items: list[dict], words: list[dict]) -> list:
-        from app.services.question_gen import Blank, derive_word_limit
-
-        anchored = anchor_manual(manual_items, words)
-        blanks = []
-        for position, a in enumerate(anchored, start=1):
-            i0, i1 = a["i0"], a["i1"]
-            blanks.append(
-                Blank(
-                    position=position,
-                    answer=a["answer"],
-                    word_start=i0,
-                    word_end=i1,
-                    t_start=float(words[i0].get("s", 0.0)),
-                    t_end=float(words[i1].get("e", 0.0)),
-                    type="noun",
-                    word_limit=derive_word_limit(i1 - i0 + 1),
-                )
-            )
-        return blanks
-
-    def _persist_set(self, material_id: str, mode: str, blanks: list) -> str:
-        set_id = _uid()
-        with db._write_lock:
-            with self.conn:
-                self.conn.execute(
-                    "INSERT INTO question_sets(id,material_id,mode,blank_count,"
-                    "params_json,stale,created_at) VALUES(?,?,?,?,?,?,?)",
-                    (set_id, material_id, mode, len(blanks), "{}", 0, _now()),
-                )
-                for b in blanks:
-                    self.conn.execute(
-                        "INSERT INTO blanks(id,set_id,position,answer,"
-                        "alternatives_json,word_start,word_end,t_start,t_end,"
-                        "type,word_limit) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                        (
-                            _uid(), set_id, b.position, b.answer,
-                            json.dumps(getattr(b, "alternatives", []) or []),
-                            b.word_start, b.word_end, b.t_start, b.t_end,
-                            b.type, b.word_limit,
-                        ),
-                    )
-        return set_id
+    def _manual_blanks(self, manual_items, words):  # deprecated shim
+        return manual_blanks(manual_items, words)
 
 
 #: process-wide singleton; app startup wires conn/engine/llm (B12)

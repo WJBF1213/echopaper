@@ -77,6 +77,18 @@ class EngineManager:
         self._last_used: float | None = None
         self._timer: asyncio.Task | None = None
 
+    def configure(
+        self,
+        settings_fn: Callable[[], dict] | None = None,
+        on_switch: Callable[[str], None] | None = None,
+    ) -> None:
+        """Late-wire hooks on the process-wide singleton (called by main.create_app)."""
+        if settings_fn is not None:
+            self._settings_fn = settings_fn
+        if on_switch is not None:
+            self._on_switch = on_switch
+        self._engine_name = None  # re-read selected engine from new settings
+
     # ------------------------------------------------------------------ util
     def _settings(self) -> dict:
         merged = dict(DEFAULT_SETTINGS)
