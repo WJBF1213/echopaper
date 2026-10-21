@@ -26,6 +26,7 @@ _ENV_KEYS = {
     "LLM_BASE_URL": ("llm.base_url", str),
     "LLM_MODEL": ("llm.model", str),
     "LLM_API_KEY": ("llm.api_key", str),
+    "LLM_MAX_CONTEXT_TOKENS": ("llm.max_context_tokens", int),
     "GEN_BLANK_COUNT": ("gen.blank_count", int),
 }
 
@@ -44,6 +45,8 @@ class LlmSettings:
     base_url: str = "https://open.bigmodel.cn/api/paas/v4"
     model: str = "glm-4.7-flash"
     api_key: str = ""
+    # may be lowered by config but hard-capped at llm.MAX_CONTEXT_TOKENS
+    max_context_tokens: int = 262144
 
 
 @dataclass
