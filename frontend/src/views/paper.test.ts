@@ -15,6 +15,9 @@ vi.mock('../api', async () => {
       examTypes: vi.fn(),
       generateExam: vi.fn(),
       audioUrl: vi.fn(() => '/api/materials/m1/audio'),
+      submitPaperAttempt: vi.fn(),
+      paperStats: vi.fn(),
+      getPaper: vi.fn(),
     },
   }
 })
@@ -129,14 +132,22 @@ function evidence(i0: number, i1: number, quote: string, t0 = 10, t1 = 11) {
   return [{ i0, i1, quote, t_start: t0, t_end: t1 }]
 }
 
-function spanItem(number: number, stem: string, answer: string, layout: string | null, label = '') {
+function spanItem(
+  number: number,
+  stem: string,
+  answer: string,
+  layout: string | null,
+  label = '',
+  t0 = 10,
+  t1 = 11,
+) {
   return {
     number,
     type: 'completion',
     stem,
     answer,
     options: [],
-    evidence: evidence(number, number + 1, answer),
+    evidence: evidence(number, number + 1, answer, t0, t1),
     word_limit: 'NO MORE THAN TWO WORDS AND/OR A NUMBER',
     layout,
     label,
@@ -179,10 +190,10 @@ function makePaper(): ExamPaper {
         visual: null,
         items: [
           {
-            ...spanItem(1, 'Job title: ______', 'assistant', 'form', 'Position'),
+            ...spanItem(1, 'Job title: ______', 'assistant', 'form', 'Position', 10, 30),
           },
           {
-            ...spanItem(2, 'Deposit: ______', 'two hundred pounds', 'form', 'Fee'),
+            ...spanItem(2, 'Deposit: ______', 'two hundred pounds', 'form', 'Fee', 40, 42),
           },
         ],
       },
@@ -200,7 +211,7 @@ function makePaper(): ExamPaper {
             stem: 'What does the speaker recommend?',
             answer: 'B',
             options: ['Take the bus', 'Ride a bike', 'Walk'],
-            evidence: evidence(40, 42, 'ride a bike'),
+            evidence: evidence(40, 42, 'ride a bike', 50, 52),
             word_limit: null,
             layout: null,
             label: '',
@@ -224,7 +235,7 @@ function makePaper(): ExamPaper {
             stem: 'City centre',
             answer: 'A',
             options: matchOptions,
-            evidence: evidence(60, 62, 'reduce traffic'),
+            evidence: evidence(60, 62, 'reduce traffic', 60, 62),
             word_limit: null,
             layout: null,
             label: '',
@@ -238,7 +249,7 @@ function makePaper(): ExamPaper {
             stem: 'Riverside',
             answer: 'C',
             options: matchOptions,
-            evidence: evidence(70, 72, 'create jobs'),
+            evidence: evidence(70, 72, 'create jobs', 70, 72),
             word_limit: null,
             layout: null,
             label: '',
@@ -262,7 +273,7 @@ function makePaper(): ExamPaper {
             stem: 'What is at blank slot 1?',
             answer: 'B',
             options: ['A. Entrance', 'B. Gift Shop', 'C. Ticket Desk', 'D. Cafe'],
-            evidence: evidence(80, 82, 'gift shop'),
+            evidence: evidence(80, 82, 'gift shop', 80, 82),
             word_limit: null,
             layout: null,
             label: '',
@@ -276,7 +287,7 @@ function makePaper(): ExamPaper {
             stem: 'What is at blank slot 2?',
             answer: 'C',
             options: ['A. Entrance', 'B. Gift Shop', 'C. Ticket Desk', 'D. Cafe'],
-            evidence: evidence(85, 86, 'ticket desk'),
+            evidence: evidence(85, 86, 'ticket desk', 85, 86),
             word_limit: null,
             layout: null,
             label: '',
@@ -317,15 +328,69 @@ function makeLayoutPaper(): ExamPaper {
   }
 }
 
-async function mountView() {
+/** A map-only paper whose items carry explicit slot fields (T14 rider). */
+function makeMapPaper(
+  mapItems: { number: number; stem: string; answer: string; slot?: number }[],
+): ExamPaper {
+  return {
+    material_id: 'm1',
+    total_items: mapItems.length,
+    warnings: [],
+    groups: [
+      {
+        type: 'map_labelling',
+        title: 'Visitor centre map',
+        instruction: 'Label the map. Choose your answers from the options (A-F).',
+        options: ['A. Entrance', 'B. Gift Shop', 'C. Ticket Desk', 'D. Cafe'],
+        partial: false,
+        visual: { kind: 'map', scene: mapScene },
+        items: mapItems.map((entry) => ({
+          number: entry.number,
+          type: 'map_labelling',
+          stem: entry.stem,
+          answer: entry.answer,
+          options: ['A. Entrance', 'B. Gift Shop', 'C. Ticket Desk', 'D. Cafe'],
+          evidence: evidence(80, 82, 'gift shop', 80, 82),
+          word_limit: null,
+          layout: null,
+          label: '',
+          alternatives: [],
+          group_title: 'Visitor centre map',
+          answer_text: 'Gift Shop',
+          ...(entry.slot != null ? { slot: entry.slot } : {}),
+        })),
+      },
+    ],
+  }
+}
+
+/** jsdom has no media element implementation. */
+function stubAudio() {
+  Object.defineProperty(HTMLMediaElement.prototype, 'play', {
+    configurable: true,
+    value: vi.fn().mockResolvedValue(undefined),
+  })
+  Object.defineProperty(HTMLMediaElement.prototype, 'pause', {
+    configurable: true,
+    value: vi.fn(),
+  })
+}
+
+beforeEach(() => {
+  stubAudio()
+  mocked.paperStats.mockResolvedValue([])
+})
+
+async function mountView(path = '/paper/m1') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
+      { path: '/paper/:materialId/:paperId', component: PaperView },
       { path: '/paper/:materialId', component: PaperView },
       { path: '/material/:materialId', component: { template: '<div />' } },
     ],
   })
-  await router.push('/paper/m1')
+  await router.push(path)
   await router.isReady()
   const wrapper = mount(PaperView, { global: { plugins: [router] } })
   await flushPromises()
@@ -510,7 +575,20 @@ describe('PaperView results', () => {
     wrapper.unmount()
   })
 
-  it('grades locally and shows the score', async () => {
+  it('submits collected answers to the server and renders the graded results', async () => {
+    mocked.submitPaperAttempt.mockResolvedValue({
+      attempt_id: 'a1',
+      created_at: '2026-10-22T10:00:00Z',
+      items: [
+        { item_number: 1, item_type: 'completion', user_answer: 'Assistant', correct: true, expected: 'assistant' },
+        { item_number: 2, item_type: 'completion', user_answer: 'wrong', correct: false, expected: 'two hundred pounds' },
+        { item_number: 3, item_type: 'mcq_single', user_answer: 'B', correct: true, expected: 'B' },
+        { item_number: 4, item_type: 'matching', user_answer: 'A', correct: true, expected: 'A' },
+        { item_number: 5, item_type: 'matching', user_answer: null, correct: false, expected: 'C' },
+        { item_number: 6, item_type: 'map_labelling', user_answer: null, correct: true, expected: 'B' },
+        { item_number: 7, item_type: 'map_labelling', user_answer: null, correct: false, expected: 'C' },
+      ],
+    })
     const wrapper = await mountView()
     await selectType(wrapper, '单选题')
     await generatePaper(wrapper)
@@ -526,16 +604,42 @@ describe('PaperView results', () => {
     const matchGroups = wrapper.findAll('.match-buttons')
     const matchButtons4 = matchGroups[0].findAll('.match-btn')
     await matchButtons4[0].trigger('click')
-    // Map item 6 expects B.
-    const mapButtons6 = matchGroups[2].findAll('.match-btn')
-    await mapButtons6[1].trigger('click')
 
     const submit = wrapper.findAll('button').find((b) => b.text().includes('交卷'))
     await submit!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('.score-summary').text()).toContain('得分 5/7')
-    expect(wrapper.findAll('.paper-item.ok')).toHaveLength(5)
+    // Only answered items are sent; numeric item numbers key the answers.
+    expect(mocked.submitPaperAttempt).toHaveBeenCalledWith('p1', {
+      1: 'Assistant',
+      2: 'two hundred pounds',
+      3: 'B',
+      4: 'A',
+    })
+
+    // Per-item verdicts render from the server response.
+    expect(wrapper.find('.score-summary').text()).toContain('得分 4/7')
+    expect(wrapper.findAll('.paper-item.ok')).toHaveLength(4)
+    expect(wrapper.findAll('.paper-item.bad')).toHaveLength(3)
+    // Wrong items show the expected answer (resolved from the paper JSON).
+    expect(wrapper.text()).toContain('答案：two hundred pounds')
+    wrapper.unmount()
+  })
+
+  it('shows per-item accuracy from paper stats next to the items', async () => {
+    mocked.paperStats.mockResolvedValue([
+      { item_number: 1, item_type: 'completion', attempts: 5, correct: 4 },
+      { item_number: 3, item_type: 'mcq_single', attempts: 1, correct: 0 },
+    ])
+    const wrapper = await mountView()
+    await selectType(wrapper, '单选题')
+    await generatePaper(wrapper)
+
+    expect(mocked.paperStats).toHaveBeenCalledWith('p1')
+    const chips = wrapper.findAll('.accuracy-chip')
+    expect(chips.map((c) => c.text())).toEqual(['正确率 80%', '正确率 0%'])
+    // Item 2 has no attempts -> no chip (every item is still rendered).
+    expect(wrapper.findAll('.paper-item')).toHaveLength(7)
     wrapper.unmount()
   })
 
@@ -630,6 +734,161 @@ describe('PaperView map group', () => {
     const active = wrapper.find('.paper-item.active')
     expect(active.exists()).toBe(true)
     expect(active.text()).toContain('blank slot 2')
+    wrapper.unmount()
+  })
+})
+
+describe('PaperView audio experience', () => {
+  beforeEach(() => {
+    mocked.getMaterial.mockResolvedValue(material)
+    mocked.examTypes.mockResolvedValue(examTypes)
+    mocked.generateExam.mockResolvedValue({ paper_id: 'p1', paper: makePaper(), skipped: [] })
+  })
+
+  it('keeps a persistent PlayerBar at the top of the page', async () => {
+    const wrapper = await mountView()
+    expect(wrapper.findComponent({ name: 'PlayerBar' }).exists()).toBe(true)
+    // Play/pause transport works through the shared player.
+    await wrapper.find('.player-card .play').trigger('click')
+    await flushPromises()
+    const audio = wrapper.find('audio').element as HTMLAudioElement
+    expect(audio.play).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('renders one regular 播放本题 button per item and seeks to the evidence start', async () => {
+    const wrapper = await mountView()
+    await selectType(wrapper, '单选题')
+    await generatePaper(wrapper)
+
+    const playButtons = wrapper.findAll('button.play-evidence')
+    expect(playButtons).toHaveLength(7)
+    // Regular button styling, not the old 11px ghost.
+    expect(playButtons[0].classes()).not.toContain('ghost')
+    expect(playButtons[0].classes()).not.toContain('small')
+
+    const audio = wrapper.find('audio').element as HTMLAudioElement
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 200 })
+    audio.dispatchEvent(new Event('loadedmetadata'))
+    await flushPromises()
+
+    await playButtons[0].trigger('click') // item 1, evidence 10-30
+    expect(audio.currentTime).toBeCloseTo(10)
+    expect(audio.play).toHaveBeenCalled()
+
+    // The progress bar highlights the item's evidence interval.
+    const band = wrapper.find('.evidence-band')
+    expect(band.exists()).toBe(true)
+    expect(band.attributes('style')).toContain('left: 5%')
+    expect(band.attributes('style')).toContain('width: 10%')
+
+    // Playback stops when it passes the evidence end.
+    audio.currentTime = 31
+    audio.dispatchEvent(new Event('timeupdate'))
+    await flushPromises()
+    expect(audio.pause).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})
+
+describe('PaperView historical paper', () => {
+  beforeEach(() => {
+    mocked.getMaterial.mockResolvedValue(material)
+    mocked.examTypes.mockResolvedValue(examTypes)
+    mocked.submitPaperAttempt.mockResolvedValue({
+      attempt_id: 'a2',
+      created_at: '2026-10-22T11:00:00Z',
+      items: [
+        { item_number: 3, item_type: 'mcq_single', user_answer: 'B', correct: true, expected: 'B' },
+      ],
+    })
+  })
+
+  it('loads the stored paper via getPaper, hides the selector, and submits against its id', async () => {
+    mocked.getPaper.mockResolvedValue({
+      id: 'p9',
+      material_id: 'm1',
+      spec: {
+        blocks: [{ type: 'mcq_single', count: 5 }],
+        layout_hint: null,
+        regenerate: false,
+      },
+      paper: makePaper(),
+      stale: true,
+      created_at: '2026-10-20T10:00:00Z',
+    })
+    const wrapper = await mountView('/paper/m1/p9')
+
+    expect(mocked.getPaper).toHaveBeenCalledWith('p9')
+    // Read-only answering flow: no generator/selector UI.
+    expect(wrapper.find('.gen-form').exists()).toBe(false)
+    expect(wrapper.findAll('.paper-group')).toHaveLength(4)
+    // Stale papers stay answerable, with the transcript-edited badge.
+    expect(wrapper.text()).toContain('转写已修改')
+
+    // Answering still works and submits against the stored paper id.
+    const optionButtons = wrapper.findAll('.mcq-options .option-btn')
+    await optionButtons[1].trigger('click') // B
+    const submit = wrapper.findAll('button').find((b) => b.text().includes('交卷'))
+    await submit!.trigger('click')
+    await flushPromises()
+    expect(mocked.submitPaperAttempt).toHaveBeenCalledWith('p9', { 3: 'B' })
+    wrapper.unmount()
+  })
+})
+
+describe('PaperView map slot linkage', () => {
+  beforeEach(() => {
+    mocked.getMaterial.mockResolvedValue(material)
+    mocked.examTypes.mockResolvedValue(examTypes)
+  })
+
+  it('prefers item.slot over the stem text when both are present', async () => {
+    // Stems say the opposite of the explicit slot fields.
+    mocked.generateExam.mockResolvedValue({
+      paper_id: 'p1',
+      paper: makeMapPaper([
+        { number: 6, stem: 'What is at blank slot 2?', answer: 'B', slot: 1 },
+        { number: 7, stem: 'What is at blank slot 1?', answer: 'C', slot: 2 },
+      ]),
+      skipped: [],
+    })
+    const wrapper = await mountView()
+    await selectType(wrapper, '地图标注')
+    await generatePaper(wrapper)
+
+    // Answer item 6 with B -> slot 1 shows B (explicit slot wins).
+    const matchButtons6 = wrapper.findAll('.match-buttons')[0].findAll('.match-btn')
+    await matchButtons6[1].trigger('click')
+    expect(wrapper.find('.mapscene-stub').attributes('data-answers')).toBe('{"1":"B"}')
+
+    // Clicking slot 2 highlights item 7, not the stem that says "slot 2".
+    const scene = wrapper.findComponent({ name: 'MapScene' })
+    scene.vm.$emit('select', 2)
+    await flushPromises()
+    const active = wrapper.find('.paper-item.active')
+    expect(active.text()).toContain('blank slot 1')
+    wrapper.unmount()
+  })
+
+  it('falls back to ordinal linkage when two items claim the same slot', async () => {
+    mocked.generateExam.mockResolvedValue({
+      paper_id: 'p1',
+      paper: makeMapPaper([
+        { number: 6, stem: 'What is at blank slot 1?', answer: 'B', slot: 1 },
+        { number: 7, stem: 'What is at blank slot 2?', answer: 'C', slot: 1 },
+      ]),
+      skipped: [],
+    })
+    const wrapper = await mountView()
+    await selectType(wrapper, '地图标注')
+    await generatePaper(wrapper)
+
+    const matchButtons = wrapper.findAll('.match-buttons')
+    await matchButtons[0].findAll('.match-btn')[1].trigger('click') // item 6 -> B
+    await matchButtons[1].findAll('.match-btn')[2].trigger('click') // item 7 -> C
+    // Ordinal against the scene's sorted slots [1, 2]: item6->1, item7->2.
+    expect(wrapper.find('.mapscene-stub').attributes('data-answers')).toBe('{"1":"B","2":"C"}')
     wrapper.unmount()
   })
 })

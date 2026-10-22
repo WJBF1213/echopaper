@@ -14,16 +14,27 @@ import {
 } from '../api'
 import { showToast } from '../router'
 import { locale, t } from '../i18n'
+import { usePlayer } from '../composables/usePlayer'
 import Icon from '../components/Icon.vue'
 import MapScene from '../components/MapScene.vue'
+import PlayerBar from '../components/PlayerBar.vue'
 
 const route = useRoute()
 const router = useRouter()
 const materialId = computed(() => String(route.params.materialId || ''))
+/** Present when the view is opened on a stored paper (/paper/:m/:p). */
+const paperIdParam = computed(() => String(route.params.paperId || ''))
+const historical = computed(() => Boolean(paperIdParam.value))
 
 const material = ref<MaterialDetail | null>(null)
 const types = ref<ExamTypeInfo[]>([])
 const paper = ref<ExamPaper | null>(null)
+/** Id of the persisted papers row behind the rendered paper (§5.1). */
+const paperId = ref('')
+/** Transcript was edited after this paper was generated (stale stays answerable). */
+const stale = ref(false)
+/** item_number -> {attempts, correct} from GET /papers/{id}/stats. */
+const statsByNumber = ref<Record<number, { attempts: number; correct: number }>>({})
 const skipped = ref<SkippedBlock[]>([])
 /** Refusal list of an all-refused 400 (no paper came back, §4.5). */
 const refusedSkipped = ref<SkippedBlock[]>([])
@@ -38,10 +49,12 @@ const loading = ref(true)
 const loadError = ref('')
 const generating = ref(false)
 const error = ref('')
+const submitting = ref(false)
 
 const textAnswers = reactive<Record<number, string>>({})
 const choiceAnswers = reactive<Record<number, string>>({})
 const multiAnswers = reactive<Record<number, string[]>>({})
+/** Server verdicts keyed by item number, driving the ok/bad rendering. */
 const states = reactive<Record<number, 'ok' | 'bad'>>({})
 const submitted = ref(false)
 const showAnswers = ref(false)
@@ -49,7 +62,23 @@ const showAnswers = ref(false)
 const activeNumber = ref<number | null>(null)
 
 const audioEl = ref<HTMLAudioElement | null>(null)
-const playEnd = ref<number | null>(null)
+const {
+  playing,
+  current: playTime,
+  duration,
+  rate,
+  abA,
+  abB,
+  seek,
+  pause,
+  toggle,
+  nudge,
+  setRate,
+  clearAb,
+  cycleAb,
+} = usePlayer(audioEl)
+/** Evidence interval of the last 播放本题 click, highlighted on the bar. */
+const evidenceRange = ref<{ start: number; end: number } | null>(null)
 const playingNumber = ref<number | null>(null)
 
 const LETTERS = 'ABCDEFGH'
@@ -165,14 +194,6 @@ function matchOptionsOf(item: ExamItem): string[] {
   return []
 }
 
-function normalizeText(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, ' ')
-}
-
-function answerLetters(value: string): string[] {
-  return [...new Set(value.toUpperCase().split(/[^A-H]+/).filter(Boolean))].sort()
-}
-
 function isSelected(item: ExamItem, value: string): boolean {
   return kindOf(item) === 'option_multi'
     ? (multiAnswers[item.number] ?? []).includes(value)
@@ -191,30 +212,23 @@ function selectOption(item: ExamItem, value: string) {
   choiceAnswers[item.number] = value
 }
 
-function isCorrect(item: ExamItem): boolean {
-  switch (kindOf(item)) {
-    case 'span': {
-      const given = normalizeText(textAnswers[item.number] ?? '')
-      if (!given) return false
-      const accepted = [item.answer, ...item.alternatives].map(normalizeText)
-      return accepted.includes(given)
-    }
-    case 'option':
-    case 'matching':
-      return (
-        (choiceAnswers[item.number] ?? '').toUpperCase() ===
-        item.answer.trim().toUpperCase()
-      )
-    case 'option_multi': {
-      const expected = answerLetters(item.answer)
-      const given = answerLetters((multiAnswers[item.number] ?? []).join(','))
-      return (
-        expected.length > 0 &&
-        expected.length === given.length &&
-        expected.every((value, index) => value === given[index])
-      )
+/** Collected answers keyed by item number; only answered items are sent
+ * (unanswered ones grade wrong server-side with user_answer null). */
+function collectAnswers(): Record<number, string> {
+  const answers: Record<number, string> = {}
+  for (const item of allItems.value) {
+    if (kindOf(item) === 'span') {
+      const text = (textAnswers[item.number] ?? '').trim()
+      if (text) answers[item.number] = text
+    } else if (kindOf(item) === 'option_multi') {
+      const letters = multiAnswers[item.number]
+      if (letters && letters.length) answers[item.number] = letters.join(',')
+    } else {
+      const letter = choiceAnswers[item.number]
+      if (letter) answers[item.number] = letter
     }
   }
+  return answers
 }
 
 function clearAnswers() {
@@ -226,55 +240,89 @@ function clearAnswers() {
   showAnswers.value = false
 }
 
-function checkAnswers() {
-  if (!allItems.value.length) return
-  for (const item of allItems.value) {
-    states[item.number] = isCorrect(item) ? 'ok' : 'bad'
+/** 交卷： grading lives on the server (design §5.2); the view only
+ * renders the per-item verdicts that come back. */
+async function submitAnswers() {
+  if (submitting.value || !paperId.value) return
+  submitting.value = true
+  try {
+    const result = await api.submitPaperAttempt(paperId.value, collectAnswers())
+    for (const key of Object.keys(states)) delete states[Number(key)]
+    for (const row of result.items) {
+      states[row.item_number] = row.correct ? 'ok' : 'bad'
+    }
+    submitted.value = true
+    void loadStats(paperId.value)
+  } catch {
+    showToast(t('paper.submitError'), 'error')
+  } finally {
+    submitting.value = false
   }
-  submitted.value = true
 }
 
-function playEvidence(item: ExamItem) {
-  const element = audioEl.value
+/** 播放本题: seek the persistent player to the item's evidence interval
+ * and highlight it on the progress bar (design §六). */
+function playItemAudio(item: ExamItem) {
   const evidence = item.evidence[0]
-  if (!element || !evidence) return
-  if (playingNumber.value === item.number && !element.paused) {
-    element.pause()
+  if (!hasAudio.value || !evidence) return
+  if (playingNumber.value === item.number && playing.value) {
+    pause()
     playingNumber.value = null
-    playEnd.value = null
     return
   }
-  element.currentTime = Math.max(0, evidence.t_start || 0)
-  playEnd.value = evidence.t_end > evidence.t_start ? evidence.t_end : null
+  const start = Math.max(0, evidence.t_start || 0)
+  const end = evidence.t_end > evidence.t_start ? evidence.t_end : null
+  evidenceRange.value = end != null ? { start, end } : null
   playingNumber.value = item.number
-  const playing = element.play()
-  if (playing && typeof playing.catch === 'function') {
-    playing.catch(() => {
-      playingNumber.value = null
-      playEnd.value = null
-    })
-  }
+  seek(start, true)
 }
 
-function onTimeUpdate() {
-  const element = audioEl.value
-  if (!element) return
-  if (playEnd.value !== null && element.currentTime >= playEnd.value) {
-    element.pause()
-    playEnd.value = null
+/** Stop at the evidence end while a per-item playback is running. */
+watch(playTime, (time) => {
+  const range = evidenceRange.value
+  if (range && playingNumber.value != null && time >= range.end) {
+    pause()
     playingNumber.value = null
+  }
+})
+
+/** A manual seek takes the bar out of per-item highlight mode. */
+function onManualSeek(time: number) {
+  evidenceRange.value = null
+  playingNumber.value = null
+  seek(time)
+}
+
+/** Per-item accuracy chip label (design §六: 显示每题正确率); null hides. */
+function accuracyText(item: ExamItem): string | null {
+  const stat = statsByNumber.value[item.number]
+  if (!stat || stat.attempts <= 0) return null
+  return t('paper.accuracy', { pct: Math.round((stat.correct / stat.attempts) * 100) })
+}
+
+async function loadStats(id: string) {
+  try {
+    const rows = await api.paperStats(id)
+    const map: Record<number, { attempts: number; correct: number }> = {}
+    for (const row of rows) map[row.item_number] = { attempts: row.attempts, correct: row.correct }
+    statsByNumber.value = map
+  } catch {
+    statsByNumber.value = {}
   }
 }
 
 function resetPaper() {
   paper.value = null
+  paperId.value = ''
+  stale.value = false
+  statsByNumber.value = {}
   skipped.value = []
   refusedSkipped.value = []
   error.value = ''
   clearAnswers()
   activeNumber.value = null
   playingNumber.value = null
-  playEnd.value = null
+  evidenceRange.value = null
 }
 
 /* ------------------------------------------------- block selector (§六) */
@@ -352,31 +400,49 @@ function partialText(group: ExamGroup): string {
 
 /* ------------------------------------------------------ map wiring (§4.3) */
 
-/** Map item stems reference their slot in text ("blank slot 1" / "空位 1"). */
+/** Older map items reference their slot in the stem text ("blank slot 1"
+ * / "空位 1"); newer ones carry an explicit slot field (T14). */
 const SLOT_RE = /(?:blank\s*slot|空位|位置)\s*#?(\d+)/i
 
-function slotOfItem(item: ExamItem): number | null {
+function slotFromStem(item: ExamItem): number | null {
   const match = item.stem.match(SLOT_RE)
   return match ? Number(match[1]) : null
 }
 
 /**
- * slot -> item for one map group. The backend numbers slots continuously
- * from 1 and item numbers are renumbered paper-wide in audio order, so the
- * stem text is the primary linkage; when no stem in the group references a
- * slot at all, fall back to in-group ordinal against the sorted slot list.
+ * slot -> item for one map group. The explicit `slot` field is preferred;
+ * the stem text is the fallback for older papers. A duplicated slot number
+ * within a group (the backend does not dedupe cross-round slots) makes the
+ * claimed linkage untrustworthy, so that group falls back to in-group
+ * ordinal against the scene's sorted slot list.
  */
 function groupSlotMap(group: ExamGroup): Map<number, ExamItem> {
   const map = new Map<number, ExamItem>()
   if (!group.visual) return map
-  const parsed = group.items.filter((item) => slotOfItem(item) !== null)
-  if (parsed.length) {
-    for (const item of parsed) {
-      const slot = slotOfItem(item)!
-      if (!map.has(slot)) map.set(slot, item)
-    }
-    return map
+
+  const explicit = new Map<number, ExamItem>()
+  let explicitDup = false
+  for (const item of group.items) {
+    if (item.slot == null) continue
+    if (explicit.has(item.slot)) explicitDup = true
+    else explicit.set(item.slot, item)
   }
+  if (explicit.size && !explicitDup) return explicit
+
+  // Once any explicit slot claim is duplicated the group's linkage is
+  // untrustworthy: skip the stem parse too and go ordinal (T14 rider).
+  const parsed = new Map<number, ExamItem>()
+  let parsedDup = false
+  if (!explicit.size) {
+    for (const item of group.items) {
+      const slot = slotFromStem(item)
+      if (slot == null) continue
+      if (parsed.has(slot)) parsedDup = true
+      else parsed.set(slot, item)
+    }
+  }
+  if (parsed.size && !parsedDup) return parsed
+
   const slots = (group.visual.scene.nodes ?? [])
     .filter((node) => node.blank_slot != null)
     .map((node) => node.blank_slot!)
@@ -411,6 +477,25 @@ function onMapSelect(group: ExamGroup, slot: number) {
 
 /* ------------------------------------------------------------- data flow */
 
+/** Adopt a stored paper (historical route): keep its id for submissions,
+ * surface staleness, and load the per-item accuracy. */
+function applyStoredPaper(stored: {
+  id: string
+  spec: { blocks?: ExamBlock[] } | null
+  paper: ExamPaper
+  stale: boolean
+}) {
+  paperId.value = stored.id
+  paper.value = stored.paper
+  stale.value = stored.stale
+  requestedCounts.value = Object.fromEntries(
+    (stored.spec?.blocks ?? []).map((block) => [block.type, block.count]),
+  )
+  clearAnswers()
+  activeNumber.value = null
+  void loadStats(stored.id)
+}
+
 async function load() {
   loading.value = true
   loadError.value = ''
@@ -421,6 +506,9 @@ async function load() {
     ])
     material.value = detail
     types.value = meta.types
+    if (paperIdParam.value) {
+      applyStoredPaper(await api.getPaper(paperIdParam.value))
+    }
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -441,6 +529,8 @@ async function generate() {
   try {
     const result = await api.generateExam(materialId.value, blocks, opts)
     paper.value = result.paper
+    paperId.value = result.paper_id
+    stale.value = false
     skipped.value = result.skipped
     requestedCounts.value = Object.fromEntries(
       blocks.map((block) => [block.type, block.count]),
@@ -448,9 +538,11 @@ async function generate() {
     clearAnswers()
     activeNumber.value = null
     playingNumber.value = null
-    playEnd.value = null
+    evidenceRange.value = null
+    void loadStats(result.paper_id)
   } catch (err) {
     paper.value = null
+    paperId.value = ''
     skipped.value = []
     const data = (err instanceof ApiError ? err.data : undefined) as
       | { skipped?: SkippedBlock[] }
@@ -463,7 +555,7 @@ async function generate() {
   }
 }
 
-watch(materialId, () => {
+watch([materialId, paperIdParam], () => {
   resetPaper()
   void load()
 })
@@ -481,17 +573,37 @@ onMounted(load)
         </button>
         <h1>{{ material?.name || t('paper.title') }}</h1>
         <span class="chip">{{ t('paper.title') }}</span>
+        <span v-if="stale" class="chip warn">{{ t('paper.stale') }}</span>
       </div>
     </header>
 
-    <audio
-      v-if="material && hasAudio"
-      ref="audioEl"
-      :src="api.audioUrl(material.id)"
-      preload="metadata"
-      style="display: none"
-      @timeupdate="onTimeUpdate"
-    ></audio>
+    <!-- Persistent transport (design §六): reuse the practice-page player. -->
+    <section v-if="material && hasAudio" class="card player-card">
+      <audio
+        ref="audioEl"
+        :src="api.audioUrl(material.id)"
+        preload="metadata"
+        style="display: none"
+      ></audio>
+
+      <PlayerBar
+        :has-audio="hasAudio"
+        :playing="playing"
+        :current="playTime"
+        :duration="duration"
+        :rate="rate"
+        :ab-a="abA"
+        :ab-b="abB"
+        :hl-start="evidenceRange?.start ?? null"
+        :hl-end="evidenceRange?.end ?? null"
+        @toggle="toggle"
+        @nudge="nudge"
+        @seek="onManualSeek"
+        @set-rate="setRate"
+        @cycle-ab="cycleAb"
+        @clear-ab="clearAb"
+      />
+    </section>
 
     <div v-if="loading" class="card empty-tip">{{ t('common.loading') }}</div>
 
@@ -500,7 +612,7 @@ onMounted(load)
     </div>
 
     <template v-else>
-      <section class="card">
+      <section v-if="!historical" class="card">
         <div class="gen-form">
           <div class="selector-block">
             <span class="tag">{{ t('paper.types') }}</span>
@@ -691,15 +803,16 @@ onMounted(load)
                     <div class="item-tools">
                       <button
                         v-if="hasAudio && item.evidence.length"
-                        class="ghost small play-evidence"
+                        class="play-evidence"
                         type="button"
-                        :title="t('paper.playEvidence')"
-                        :aria-label="t('paper.playEvidence')"
-                        @click="playEvidence(item)"
+                        :title="t('paper.playItem')"
+                        :aria-label="t('paper.playItem')"
+                        @click="playItemAudio(item)"
                       >
-                        <Icon :name="playingNumber === item.number ? 'pause' : 'play'" :size="11" />
-                        {{ t('paper.playEvidence') }}
+                        <Icon :name="playingNumber === item.number ? 'pause' : 'play'" :size="12" />
+                        {{ t('paper.playItem') }}
                       </button>
+                      <span v-if="accuracyText(item)" class="chip accuracy-chip">{{ accuracyText(item) }}</span>
                       <span v-if="item.word_limit" class="hint">{{ item.word_limit }}</span>
                     </div>
                   </div>
@@ -751,6 +864,18 @@ onMounted(load)
                         />
                       </p>
                       <div class="item-tools">
+                        <button
+                          v-if="hasAudio && item.evidence.length"
+                          class="play-evidence"
+                          type="button"
+                          :title="t('paper.playItem')"
+                          :aria-label="t('paper.playItem')"
+                          @click="playItemAudio(item)"
+                        >
+                          <Icon :name="playingNumber === item.number ? 'pause' : 'play'" :size="12" />
+                          {{ t('paper.playItem') }}
+                        </button>
+                        <span v-if="accuracyText(item)" class="chip accuracy-chip">{{ accuracyText(item) }}</span>
                         <span v-if="item.word_limit" class="hint">{{ item.word_limit }}</span>
                       </div>
                     </td>
@@ -803,6 +928,18 @@ onMounted(load)
                       />
                     </p>
                     <div class="item-tools">
+                      <button
+                        v-if="hasAudio && item.evidence.length"
+                        class="play-evidence"
+                        type="button"
+                        :title="t('paper.playItem')"
+                        :aria-label="t('paper.playItem')"
+                        @click="playItemAudio(item)"
+                      >
+                        <Icon :name="playingNumber === item.number ? 'pause' : 'play'" :size="12" />
+                        {{ t('paper.playItem') }}
+                      </button>
+                      <span v-if="accuracyText(item)" class="chip accuracy-chip">{{ accuracyText(item) }}</span>
                       <span v-if="item.word_limit" class="hint">{{ item.word_limit }}</span>
                     </div>
                   </div>
@@ -897,6 +1034,18 @@ onMounted(load)
                       />
                     </p>
                     <div class="item-tools">
+                      <button
+                        v-if="hasAudio && item.evidence.length"
+                        class="play-evidence"
+                        type="button"
+                        :title="t('paper.playItem')"
+                        :aria-label="t('paper.playItem')"
+                        @click="playItemAudio(item)"
+                      >
+                        <Icon :name="playingNumber === item.number ? 'pause' : 'play'" :size="12" />
+                        {{ t('paper.playItem') }}
+                      </button>
+                      <span v-if="accuracyText(item)" class="chip accuracy-chip">{{ accuracyText(item) }}</span>
                       <span v-if="item.word_limit" class="hint">{{ item.word_limit }}</span>
                     </div>
                   </div>
@@ -1007,15 +1156,16 @@ onMounted(load)
                 <div class="item-tools">
                   <button
                     v-if="hasAudio && item.evidence.length"
-                    class="ghost small play-evidence"
+                    class="play-evidence"
                     type="button"
-                    :title="t('paper.playEvidence')"
-                    :aria-label="t('paper.playEvidence')"
-                    @click="playEvidence(item)"
+                    :title="t('paper.playItem')"
+                    :aria-label="t('paper.playItem')"
+                    @click="playItemAudio(item)"
                   >
-                    <Icon :name="playingNumber === item.number ? 'pause' : 'play'" :size="11" />
-                    {{ t('paper.playEvidence') }}
+                    <Icon :name="playingNumber === item.number ? 'pause' : 'play'" :size="12" />
+                    {{ t('paper.playItem') }}
                   </button>
+                  <span v-if="accuracyText(item)" class="chip accuracy-chip">{{ accuracyText(item) }}</span>
                   <span v-if="item.word_limit" class="hint">{{ item.word_limit }}</span>
                 </div>
 
@@ -1032,9 +1182,14 @@ onMounted(load)
 
         <section class="card actions-card">
           <div class="row">
-            <button class="big" type="button" @click="checkAnswers">
+            <button
+              class="big"
+              type="button"
+              :disabled="submitting || !paperId"
+              @click="submitAnswers"
+            >
               <Icon name="check" :size="14" />
-              {{ t('paper.submit') }}
+              {{ submitting ? t('paper.submitting') : t('paper.submit') }}
             </button>
             <button
               class="ghost"
@@ -1058,7 +1213,7 @@ onMounted(load)
         </section>
       </template>
 
-      <div v-else-if="!generating && !error" class="card empty-tip">
+      <div v-else-if="!historical && !generating && !error" class="card empty-tip">
         <p>{{ t('paper.empty') }}</p>
         <p class="hint empty-hint">{{ t('paper.emptyHint') }}</p>
       </div>
@@ -1586,8 +1741,20 @@ onMounted(load)
 }
 
 .play-evidence {
-  padding: 3px 8px;
-  font-size: 11.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+}
+
+.accuracy-chip {
+  font-size: 11px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.player-card {
+  padding-bottom: 16px;
 }
 
 .answer-key {

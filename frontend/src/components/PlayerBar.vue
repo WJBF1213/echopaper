@@ -12,6 +12,9 @@ const props = defineProps<{
   rate: number
   abA: number | null
   abB: number | null
+  /** Evidence interval to highlight on the bar (seconds; 播放本题). */
+  hlStart?: number | null
+  hlEnd?: number | null
 }>()
 
 const emit = defineEmits<{
@@ -26,6 +29,16 @@ const emit = defineEmits<{
 const progress = computed(() => {
   if (!props.duration) return 0
   return Math.min(100, (props.current / props.duration) * 100)
+})
+
+/** Highlight band geometry, as percentages of the full duration. */
+const band = computed(() => {
+  const { hlStart, hlEnd, duration } = props
+  if (hlStart == null || hlEnd == null || !duration || hlEnd <= hlStart) return null
+  return {
+    left: Math.min(100, Math.max(0, (hlStart / duration) * 100)),
+    width: Math.min(100, ((hlEnd - hlStart) / duration) * 100),
+  }
 })
 
 const abLabel = computed(() => {
@@ -49,17 +62,24 @@ function onRateChange(event: Event) {
   <div v-if="hasAudio" class="player">
     <div class="seekrow">
       <span class="time">{{ fmtTime(current) }}</span>
-      <input
-        class="seek"
-        type="range"
-        min="0"
-        max="1000"
-        step="1"
-        :value="Math.round(progress * 10)"
-        :style="{ '--p': `${progress}%` }"
-        :aria-label="t('player.progress')"
-        @input="onSeekInput"
-      />
+      <div class="seekwrap">
+        <span
+          v-if="band"
+          class="evidence-band"
+          :style="{ left: `${band.left}%`, width: `${band.width}%` }"
+        ></span>
+        <input
+          class="seek"
+          type="range"
+          min="0"
+          max="1000"
+          step="1"
+          :value="Math.round(progress * 10)"
+          :style="{ '--p': `${progress}%` }"
+          :aria-label="t('player.progress')"
+          @input="onSeekInput"
+        />
+      </div>
       <span class="time">{{ fmtTime(duration) }}</span>
     </div>
 
@@ -111,6 +131,26 @@ function onRateChange(event: Event) {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   text-align: center;
+}
+
+.seekwrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+}
+
+/* Highlighted evidence interval (播放本题): a translucent band over the
+ * track; pointer-events none so dragging through it still works. */
+.evidence-band {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  pointer-events: none;
+  z-index: 1;
 }
 
 .seek {
