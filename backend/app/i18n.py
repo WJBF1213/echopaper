@@ -95,6 +95,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         # --- pipeline ------------------------------------------------------
         "job.downloading": "下载音频",
         "job.transcribing": "本地识别中",
+        "job.translating": "生成译文中",
         "job.no_input": "缺少音频或转写文本，无法创建材料",
         "job.audio_not_found": "音频文件不存在：{path}",
         # --- engines -------------------------------------------------------
@@ -161,6 +162,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         # --- pipeline ------------------------------------------------------
         "job.downloading": "Downloading audio",
         "job.transcribing": "Transcribing locally",
+        "job.translating": "Translating",
         "job.no_input": "Audio or transcript is required to create a material",
         "job.audio_not_found": "Audio file not found: {path}",
         # --- engines -------------------------------------------------------

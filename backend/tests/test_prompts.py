@@ -3,10 +3,11 @@
 Task 9 swapped the 13 legacy type-rule entries for the six-key registry
 (mcq_single / mcq_multi / matching / completion / short_answer /
 map_labelling), each carrying a refusal-guidance paragraph (design §4.5).
-Task 12 added the map scene prompt (``scene.user``, design §4.3). The
-registry therefore holds 3 frames x 2 locales + 6 rules x 2 locales +
-1 scene x 2 locales = 20 entries; ``PROMPTS_VERSION`` moved to 3 so LLM
-cache keys change.
+Task 12 added the map scene prompt (``scene.user``, design §4.3). Task 22
+added the locale-less batch translation prompt (``translate.batch``,
+design §7.2). The registry therefore holds 3 frames x 2 locales +
+6 rules x 2 locales + 1 scene x 2 locales + 1 translate entry = 21
+entries; ``PROMPTS_VERSION`` moved to 4 so LLM cache keys change.
 """
 import pytest
 
@@ -150,16 +151,19 @@ def test_registry_contains_all_keys():
     for type_key in NEW_TYPE_KEYS:
         for loc in ("zh", "en"):
             expected.add(f"exam.rules.{type_key}.{loc}")
+    # Task 22 (design §7.2): the batch translation prompt is a SINGLE
+    # locale-less entry -- the output is Chinese regardless of UI locale.
+    expected.add("translate.batch")
 
-    # 3 frames x 2 locales + 6 rules x 2 locales + scene.user x 2 = 20.
+    # 3 frames x 2 + 6 rules x 2 + scene x 2 = 20, + translate.batch = 21.
     assert keys == expected
-    assert len(keys) == 20
+    assert len(keys) == 21
     # The 13-key legacy type registry is fully gone.
     for old in OLD_TYPE_KEYS:
         assert f"exam.rules.{old}.zh" not in keys
         assert f"exam.rules.{old}.en" not in keys
 
-    assert prompts.PROMPTS_VERSION == 3
+    assert prompts.PROMPTS_VERSION == 4
     # Every rules default ends with its refusal guidance paragraph
     # (design §4.5): "refused" plus the locale's do-not-force wording.
     for spec in prompts.ALL_PROMPTS:
@@ -174,8 +178,38 @@ def test_registry_contains_all_keys():
     assert scene.category == "scene"
     assert "refused" in scene.default
     assert "不要硬凑" in scene.default
+    # The batch translation prompt names its JSON reply shape (§7.2).
+    batch = next(s for s in prompts.ALL_PROMPTS if s.key == "translate.batch")
+    assert batch.category == "translate"
+    assert batch.variables == ("sentences",)
+    assert '{"items"' in batch.default
     # Every default template actually carries its declared placeholders.
     for spec in prompts.ALL_PROMPTS:
         for var in spec.variables:
             assert "{{" + var + "}}" in spec.default, spec.key
-        assert spec.key.endswith((".zh", ".en"))
+        # locale-suffixed, or an explicitly locale-less entry
+        assert spec.key.endswith((".zh", ".en")) or spec.key == "translate.batch"
+
+
+def test_translate_batch_renders_for_any_locale(tmp_db):
+    """The locale-less translate.batch entry renders identically for
+    every locale (§7.4: Chinese output regardless of UI locale) and
+    keeps the literal-replace contract."""
+    text = prompts.render_prompt(
+        tmp_db, "translate.batch", "zh",
+        sentences="0. Hello there\n1. Goodbye now",
+    )
+    assert "{{" not in text
+    assert "0. Hello there" in text
+    assert "1. Goodbye now" in text
+    en = prompts.render_prompt(
+        tmp_db, "translate.batch", "en",
+        sentences="0. Hello there\n1. Goodbye now",
+    )
+    assert en == text  # one template serves every locale
+    # declared-variable validation still applies to the locale-less key
+    with pytest.raises(PromptError):
+        prompts.render_prompt(tmp_db, "translate.batch", "zh")  # missing var
+    with pytest.raises(PromptError):
+        prompts.render_prompt(tmp_db, "translate.batch", "zh",
+                              sentences="x", bogus="y")  # undeclared var

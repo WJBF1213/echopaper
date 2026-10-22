@@ -50,7 +50,7 @@ def create_app(
         conn = db.connect(data_dir / "app.db")
         db.init_db(conn)
 
-    from app.routers.settings import effective_settings
+    from app.routers.settings import effective_settings, llm_cfg_or_none
 
     engine_manager = engine_manager or engines.manager
     jobs_manager = jobs_manager or jobs_svc.jobs
@@ -60,6 +60,15 @@ def create_app(
             return effective_settings(conn)["asr"]
         except Exception:
             return {}
+
+    def llm_cfg():
+        """Effective LLM cfg for the translating stage (T22): read from
+        the SAME source as the settings/exam routers, at stage time, so
+        a key saved mid-flight applies to the next job. None = no key."""
+        try:
+            return llm_cfg_or_none(effective_settings(conn))
+        except Exception:
+            return None
 
     def persist_engine(name: str) -> None:
         current = asr_settings()
@@ -74,6 +83,7 @@ def create_app(
         conn=conn,
         engine_manager=engine_manager,
         data_dir=data_dir,
+        llm_settings_fn=llm_cfg,
     )
     jobs_svc.reconcile_interrupted(conn)
     from app.services import audio as audio_svc

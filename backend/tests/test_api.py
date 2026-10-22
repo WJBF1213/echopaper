@@ -330,6 +330,36 @@ def test_put_transcript_realigns_and_stales_papers(tmp_db, client):
     assert body["words"][2]["w"] == "castle"
 
 
+def test_put_transcript_deletes_material_translations(tmp_db, client):
+    """转写编辑即作废旧译文 (design §7.2): realignment changes the
+    sentence ranges, so the material_translations snapshot dies at the
+    same trigger point that stales papers."""
+    from app.services.jobs import _now
+
+    mid = _seed_material(tmp_db)
+    now = _now()
+    tmp_db.executemany(
+        "INSERT INTO material_translations(material_id,sentence_index,"
+        "src,dst,created_at) VALUES(?,?,?,?,?)",
+        [
+            (mid, 0, "The little castle stands near the river",
+             "小城堡矗立在河边", now),
+            (mid, 1, "The tall tower rises above the trees",
+             "高塔耸立在树梢之上", now),
+        ],
+    )
+    r = client.put(
+        f"/api/materials/{mid}/transcript",
+        json={"transcript": "The little castle stands near the river."},
+    )
+    assert r.status_code == 200
+    left = tmp_db.execute(
+        "SELECT COUNT(*) c FROM material_translations WHERE material_id=?",
+        (mid,),
+    ).fetchone()["c"]
+    assert left == 0
+
+
 def test_delete_material_removes_row_and_audio(tmp_db, client, tmp_path):
     audio = tmp_path / "del.mp3"
     audio.write_bytes(b"XYZ")

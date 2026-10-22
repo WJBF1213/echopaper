@@ -1,10 +1,10 @@
-"""Material ingestion job pipeline tests (redesign §5.3, Task 18).
+"""Material ingestion job pipeline tests (redesign §5.3, Task 18; §7.2
+translating stage in Task 22).
 
-The pipeline is transcription-only: ``queued -> (downloading) ->
-transcribing -> done``. There is no generating stage; the cloze tables
-(``question_sets``/``blanks``) no longer exist at all (db.py drops them
-at init, Task 19), so pasted ``[[ ]]`` brackets stay literal (manual
-parsing is gone) and nothing can ever write set/blank rows. All
+The pipeline is ``queued -> (downloading) -> transcribing ->
+(translating) -> done``: transcription-only plus the LLM-first batch
+translation stage. The translating stage is skipped entirely (with a
+note, never an error) when no LLM key is configured. All
 engines/LLM/net are mocked.
 """
 import asyncio
@@ -43,7 +43,10 @@ class FakeEngineManager:
         self.released += 1
 
 
-def make_jm(tmp_db, raw_words=None):
+LLM_CFG = {"provider": "zhipu", "api_key": "k"}
+
+
+def make_jm(tmp_db, raw_words=None, llm_cfg=None):
     raw = raw_words if raw_words is not None else _raw_asr_words(
         ["Hello", "there", "friend", "The", "castle", "stands", "near",
          "the", "river", "today", "again", "friends"]
@@ -53,6 +56,7 @@ def make_jm(tmp_db, raw_words=None):
         conn=tmp_db,
         engine_manager=engine,
         data_dir=None,  # per-test tmp
+        llm_settings_fn=(lambda: llm_cfg) if llm_cfg is not None else None,
     )
     return jm, engine
 
@@ -156,7 +160,11 @@ async def test_url_import_passes_downloading_stage(
     assert "downloading" in seen
     assert "transcribing" in seen
     assert "generating" not in seen
-    assert set(seen) <= {"queued", "downloading", "transcribing", "done"}
+    # translating is a legal stage now (§7.2) but is skipped without a
+    # key, which this test never wires.
+    assert set(seen) <= {
+        "queued", "downloading", "transcribing", "translating", "done",
+    }
     _assert_no_sets_written(tmp_db)
 
 
@@ -420,3 +428,319 @@ def test_reconcile_interrupted_marks_stale_jobs(tmp_db):
     assert rows["j1"]["state"] == "error"
     assert "重启" in rows["j1"]["message"]
     assert rows["j2"]["state"] == "done"
+
+
+# --------------------------------------- translating stage (design §7.2)
+
+TWO_SENTENCE_WORDS = ["Hello", "there", "friend.", "The", "castle", "stands."]
+
+
+def _translation_rows(conn, material_id):
+    return conn.execute(
+        "SELECT sentence_index,src,dst FROM material_translations"
+        " WHERE material_id=? ORDER BY sentence_index",
+        (material_id,),
+    ).fetchall()
+
+
+@pytest.mark.asyncio
+async def test_translating_stage_in_upload_pipeline(tmp_db, tmp_path, monkeypatch):
+    """Pipeline order ... -> transcribing -> translating -> done for the
+    audio path; the LLM batch result lands in material_translations and
+    is written back to the shared translations cache."""
+    jm, _ = make_jm(tmp_db, raw_words=_raw_asr_words(TWO_SENTENCE_WORDS),
+                    llm_cfg=LLM_CFG)
+
+    async def fake_batch(conn, cfg, sentences, **kw):
+        await asyncio.sleep(0)  # yield so the poller observes 'translating'
+        return {i: f"译{i}" for i, _ in sentences}
+
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate_llm_batch", fake_batch)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3-fake")
+    job_id = await jm.create({
+        "name": "With LLM",
+        "source_type": "upload",
+        "audio_path": str(audio),
+        "data_dir": tmp_path,
+    })
+    seen: list[str] = []
+    job = await _run_to_completion(jm, job_id, seen=seen)
+    assert job["state"] == "done"
+    assert "translating" in seen
+    assert seen.index("transcribing") < seen.index("translating")
+    assert seen.index("translating") < seen.index("done")
+
+    rows = _translation_rows(tmp_db, job["material_id"])
+    assert [(r["sentence_index"], r["src"]) for r in rows] == [
+        (0, "Hello there friend"),   # §7.1 sentence_text derivation
+        (1, "The castle stands"),
+    ]
+    assert [r["dst"] for r in rows] == ["译0", "译1"]
+    # writeback: every dst also lands in the shared translations cache
+    # (cross-material dedup, §7.2)
+    for r in rows:
+        cached = tmp_db.execute(
+            "SELECT dst FROM translations WHERE hash=?",
+            (jobs_mod.translate_svc._hash(r["src"]),),
+        ).fetchone()
+        assert cached is not None and cached["dst"] == r["dst"]
+
+
+@pytest.mark.asyncio
+async def test_translating_stage_in_transcript_only_pipeline(
+    tmp_db, tmp_path, monkeypatch
+):
+    """The transcript-only (manual, no audio) path runs the same
+    translating stage -- both pipeline paths pass through it (§7.2)."""
+    jm, _ = make_jm(tmp_db, llm_cfg=LLM_CFG)
+
+    async def fake_batch(conn, cfg, sentences, **kw):
+        await asyncio.sleep(0)
+        return {i: f"译{i}" for i, _ in sentences}
+
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate_llm_batch", fake_batch)
+    job_id = await jm.create({
+        "name": "Text only",
+        "source_type": "upload",
+        "transcript": "Hello there friend. The castle stands.",
+        "data_dir": tmp_path,
+    })
+    seen: list[str] = []
+    job = await _run_to_completion(jm, job_id, seen=seen)
+    assert job["state"] == "done"
+    assert "translating" in seen
+    rows = _translation_rows(tmp_db, job["material_id"])
+    assert [r["src"] for r in rows] == [
+        "Hello there friend", "The castle stands",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_translating_progress_is_30_plus_40_per_batch(
+    tmp_db, tmp_path, monkeypatch
+):
+    """§7.2 进度 30 + 40*i/n: translating starts at 30 and advances by
+    40*done/total per completed batch, never past 70 (done takes 100)."""
+    raw = _raw_asr_words([f"w{i}." for i in range(21)])  # 21 one-word sentences
+    jm, _ = make_jm(tmp_db, raw_words=raw, llm_cfg=LLM_CFG)
+
+    async def fake_batch(conn, cfg, sentences, **kw):
+        await asyncio.sleep(0)
+        return {i: f"译{i}" for i, _ in sentences}
+
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate_llm_batch", fake_batch)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3-fake")
+    job_id = await jm.create({
+        "name": "Progress",
+        "source_type": "upload",
+        "audio_path": str(audio),
+        "data_dir": tmp_path,
+    })
+
+    pcts: list[float] = []
+
+    async def watch():
+        while True:
+            job = jm.get(job_id)
+            if job["state"] == "translating":
+                pcts.append(job["percent"])
+            if job["state"] in ("done", "error"):
+                return job
+            await asyncio.sleep(0)
+
+    job = await asyncio.wait_for(watch(), 5.0)
+    assert job["state"] == "done"
+    assert 30.0 in pcts                       # starts where transcribing ended
+    assert any(30.0 < p <= 70.0 for p in pcts)  # 20/21 done after batch 1
+    assert max(pcts) <= 70.0                  # translating never passes 70
+    assert len(_translation_rows(tmp_db, job["material_id"])) == 21
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wired", [False, True], ids=["unwired", "fn-returns-none"])
+async def test_no_llm_key_skips_translating_stage(
+    tmp_db, tmp_path, monkeypatch, wired
+):
+    """无 key 整阶段跳过写 note 不报错: zero LLM calls, the job still
+    reaches done (batch imports of 50 files must not explode)."""
+    async def bomb(*a, **k):
+        raise AssertionError("no LLM call is allowed without a key")
+
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate_llm_batch", bomb)
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate", bomb)
+
+    if wired:
+        jm = JobManager(
+            conn=tmp_db,
+            engine_manager=FakeEngineManager(
+                _raw_asr_words(TWO_SENTENCE_WORDS)
+            ),
+            data_dir=None,
+            llm_settings_fn=lambda: None,
+        )
+    else:
+        jm, _ = make_jm(tmp_db, raw_words=_raw_asr_words(TWO_SENTENCE_WORDS))
+
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3-fake")
+    job_id = await jm.create({
+        "name": "No key",
+        "source_type": "upload",
+        "audio_path": str(audio),
+        "data_dir": tmp_path,
+    })
+    seen: list[str] = []
+    job = await _run_to_completion(jm, job_id, seen=seen)
+    assert job["state"] == "done"            # never error
+    assert "translating" not in seen         # the stage is skipped entirely
+    assert "LLM" in (job["message"] or "")   # llm.no_key note surfaced
+    assert _translation_rows(tmp_db, job["material_id"]) == []
+    assert tmp_db.execute(
+        "SELECT COUNT(*) c FROM translations").fetchone()["c"] == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_partial_results_fall_back_per_sentence(
+    tmp_db, tmp_path, monkeypatch
+):
+    """Sentences the batch missed get the existing per-sentence channels
+    (gtx -> MyMemory -> LLM) as fallback."""
+    jm, _ = make_jm(tmp_db, raw_words=_raw_asr_words(TWO_SENTENCE_WORDS),
+                    llm_cfg=LLM_CFG)
+    fallbacks: list[str] = []
+
+    async def fake_batch(conn, cfg, sentences, **kw):
+        await asyncio.sleep(0)
+        return {0: "批量译文"}  # sentence 1 missing from the batch reply
+
+    async def fake_translate(text, llm_cfg=None, conn=None, client=None):
+        fallbacks.append(text)
+        return f"单句:{text}"
+
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate_llm_batch", fake_batch)
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate", fake_translate)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3-fake")
+    job_id = await jm.create({
+        "name": "Partial",
+        "source_type": "upload",
+        "audio_path": str(audio),
+        "data_dir": tmp_path,
+    })
+    job = await _run_to_completion(jm, job_id)
+    assert job["state"] == "done"
+    rows = _translation_rows(tmp_db, job["material_id"])
+    assert {r["sentence_index"]: r["dst"] for r in rows} == {
+        0: "批量译文",
+        1: "单句:The castle stands",
+    }
+    assert fallbacks == ["The castle stands"]  # only the missing one
+
+
+@pytest.mark.asyncio
+async def test_batch_llm_error_falls_back_per_sentence(
+    tmp_db, tmp_path, monkeypatch
+):
+    """A whole-batch LlmError degrades every sentence of that batch to
+    the per-sentence channels; the job still finishes."""
+    from app.services.llm import LlmError
+
+    jm, _ = make_jm(tmp_db, raw_words=_raw_asr_words(TWO_SENTENCE_WORDS),
+                    llm_cfg=LLM_CFG)
+
+    async def failing_batch(conn, cfg, sentences, **kw):
+        await asyncio.sleep(0)
+        raise LlmError("provider down")
+
+    async def fake_translate(text, llm_cfg=None, conn=None, client=None):
+        return f"单句:{text}"
+
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate_llm_batch", failing_batch)
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate", fake_translate)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3-fake")
+    job_id = await jm.create({
+        "name": "LLM down",
+        "source_type": "upload",
+        "audio_path": str(audio),
+        "data_dir": tmp_path,
+    })
+    job = await _run_to_completion(jm, job_id)
+    assert job["state"] == "done"
+    rows = _translation_rows(tmp_db, job["material_id"])
+    assert {r["sentence_index"]: r["dst"] for r in rows} == {
+        0: "单句:Hello there friend",
+        1: "单句:The castle stands",
+    }
+
+
+@pytest.mark.asyncio
+async def test_fallback_failure_leaves_sentence_untranslated_not_error(
+    tmp_db, tmp_path, monkeypatch
+):
+    """A sentence failing every channel is simply absent from the
+    snapshot (listen view shows the placeholder); the job still done."""
+    from app.services.llm import LlmError
+    from app.services.translate_svc import TranslateError
+
+    jm, _ = make_jm(tmp_db, raw_words=_raw_asr_words(TWO_SENTENCE_WORDS),
+                    llm_cfg=LLM_CFG)
+
+    async def failing_batch(conn, cfg, sentences, **kw):
+        await asyncio.sleep(0)
+        raise LlmError("provider down")
+
+    async def failing_translate(text, llm_cfg=None, conn=None, client=None):
+        raise TranslateError("all channels down")
+
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate_llm_batch", failing_batch)
+    monkeypatch.setattr(jobs_mod.translate_svc, "translate", failing_translate)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3-fake")
+    job_id = await jm.create({
+        "name": "All channels down",
+        "source_type": "upload",
+        "audio_path": str(audio),
+        "data_dir": tmp_path,
+    })
+    job = await _run_to_completion(jm, job_id)
+    assert job["state"] == "done"
+    assert _translation_rows(tmp_db, job["material_id"]) == []
+
+
+@pytest.mark.asyncio
+async def test_cached_sentence_skips_llm_batch(tmp_db, tmp_path, monkeypatch):
+    """Cross-material dedup: a sentence already in the translations
+    cache is served from it and never sent to the LLM batch."""
+    translate_svc = jobs_mod.translate_svc
+    translate_svc._store(tmp_db, "Hello there friend", "缓存译文")
+    jm, _ = make_jm(tmp_db, raw_words=_raw_asr_words(TWO_SENTENCE_WORDS),
+                    llm_cfg=LLM_CFG)
+    batch_args: list[list] = []
+
+    async def fake_batch(conn, cfg, sentences, **kw):
+        await asyncio.sleep(0)
+        batch_args.append(list(sentences))
+        return {i: f"译{i}" for i, _ in sentences}
+
+    monkeypatch.setattr(translate_svc, "translate_llm_batch", fake_batch)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3-fake")
+    job_id = await jm.create({
+        "name": "Dedup",
+        "source_type": "upload",
+        "audio_path": str(audio),
+        "data_dir": tmp_path,
+    })
+    job = await _run_to_completion(jm, job_id)
+    assert job["state"] == "done"
+    # only the uncached sentence reached the LLM
+    assert batch_args == [[(1, "The castle stands")]]
+    rows = _translation_rows(tmp_db, job["material_id"])
+    assert {r["sentence_index"]: r["dst"] for r in rows} == {
+        0: "缓存译文",
+        1: "译1",
+    }
+

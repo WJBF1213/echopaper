@@ -250,6 +250,13 @@ def put_transcript(material_id: str, body: TranscriptIn, request: Request):
                 "UPDATE papers SET stale=1 WHERE material_id=?",
                 (material_id,),
             )
+            # 转写编辑即作废旧译文 (§7.2): realignment changed the
+            # sentence ranges, so the translation snapshot rows are
+            # meaningless; the next pipeline run can regenerate them.
+            conn.execute(
+                "DELETE FROM material_translations WHERE material_id=?",
+                (material_id,),
+            )
     return {
         "id": material_id,
         "transcript_source": source,

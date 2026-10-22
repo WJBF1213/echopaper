@@ -1,10 +1,20 @@
-"""Task B11 tests: sentence translation with cache + fallbacks."""
+"""Task B11 tests: sentence translation with cache + fallbacks.
+
+Extended for the redesign §7.2 pipeline: ``translate_llm_batch`` is the
+LLM-first numbered-sentence batch channel (ONE ``cached_chat_json`` call
+per ~20-sentence batch, task=``translate``); per-sentence channels stay
+the fallback. All LLM/net access is faked.
+"""
 import json
+import re
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
+from app.services import llm as llm_mod
 from app.services import translate_svc
+from app.services.llm import LlmError
 from app.services.translate_svc import TranslateError, translate, translate_sentence
 
 
@@ -194,3 +204,140 @@ def test_legacy_derivation_styles_agree_with_authoritative():
     assert exam_join(plain, 0, 2) == sentence_text(WORDS, 0, 2)
     # legacy pos._formulaic_words inline style
     assert " ".join(plain[0 : 2 + 1]).strip() == sentence_text(WORDS, 0, 2)
+
+
+# ------------------------------------------- translate_llm_batch (spec §7.2)
+
+LLM_CFG = {"provider": "zhipu", "api_key": "k"}
+
+
+class FakeChat:
+    """Fake llm.cached_chat_json honouring its contract:
+    (conn, cfg, messages, *, task, ...) -> (obj, usage, from_cache).
+    Replies route by call order; each is a parsed dict or an Exception."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    async def __call__(self, conn, cfg, messages, *, task, **kwargs):
+        self.calls.append(
+            {"conn": conn, "cfg": cfg, "messages": messages,
+             "task": task, "kwargs": kwargs}
+        )
+        item = self.replies.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item, SimpleNamespace(
+            prompt_tokens=1, completion_tokens=1, cached_tokens=0
+        ), False
+
+
+@pytest.mark.asyncio
+async def test_llm_batch_one_call_translates_many_sentences(tmp_db, monkeypatch):
+    """§7.2 LLM 优先、批量: a whole numbered batch is ONE cached_chat_json
+    call with task=translate; the reply's items map back i -> t."""
+    sentences = [
+        (0, "Hello there friend"),
+        (1, "The castle stands"),
+        (2, "A quiet village sits"),
+    ]
+    chat = FakeChat([{"items": [
+        {"i": 0, "t": "你好，朋友"},
+        {"i": 1, "t": "城堡矗立"},
+        {"i": 2, "t": "一个安静的村庄"},
+    ]}])
+    monkeypatch.setattr(llm_mod, "cached_chat_json", chat)
+    out = await translate_svc.translate_llm_batch(tmp_db, LLM_CFG, sentences)
+    assert out == {0: "你好，朋友", 1: "城堡矗立", 2: "一个安静的村庄"}
+    # exactly one LLM round trip for the whole batch
+    assert len(chat.calls) == 1
+    call = chat.calls[0]
+    assert call["task"] == "translate"
+    assert call["conn"] is tmp_db and call["cfg"] is LLM_CFG
+    assert call["messages"][0]["role"] == "system"
+    user = call["messages"][-1]["content"]
+    # sentences arrive numbered by their sentence_index
+    assert "0. Hello there friend" in user
+    assert "1. The castle stands" in user
+    assert "2. A quiet village sits" in user
+    # the prompt itself instructs the JSON-only reply shape
+    assert '{"items"' in user
+
+
+@pytest.mark.asyncio
+async def test_llm_batch_chunks_at_twenty_sentences(tmp_db, monkeypatch):
+    """~20 句/批 (max_tokens=4096 natural constraint): 21 sentences make
+    exactly two calls, numbering preserved across chunks."""
+    sentences = [(i, f"Sentence number {i}") for i in range(21)]
+    calls = []
+
+    async def echo_chat(conn, cfg, messages, *, task, **kwargs):
+        calls.append(messages)
+        nums = [
+            int(m)
+            for m in re.findall(r"^(\d+)\. ", messages[-1]["content"], re.M)
+        ]
+        return (
+            {"items": [{"i": n, "t": f"译文{n}"} for n in nums]},
+            SimpleNamespace(prompt_tokens=1, completion_tokens=1,
+                            cached_tokens=0),
+            False,
+        )
+
+    monkeypatch.setattr(llm_mod, "cached_chat_json", echo_chat)
+    out = await translate_svc.translate_llm_batch(tmp_db, LLM_CFG, sentences)
+    assert out == {i: f"译文{i}" for i in range(21)}
+    assert len(calls) == 2
+    assert "20. Sentence number 20" in calls[1][-1]["content"]
+    assert "0. Sentence number 0" not in calls[1][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_llm_batch_partial_missing_indices_absent(tmp_db, monkeypatch):
+    """Partial results are kept; junk items (unknown i, blank t, non-dict,
+    missing i) are dropped instead of crashing the caller."""
+    chat = FakeChat([{"items": [
+        {"i": 0, "t": "只翻第一句"},
+        {"i": 7, "t": "编号不在本批"},
+        {"i": 1, "t": "   "},
+        "junk",
+        {"t": "没有编号"},
+    ]}])
+    monkeypatch.setattr(llm_mod, "cached_chat_json", chat)
+    out = await translate_svc.translate_llm_batch(
+        tmp_db, LLM_CFG, [(0, "A sentence"), (1, "Another one")]
+    )
+    assert out == {0: "只翻第一句"}
+
+
+@pytest.mark.asyncio
+async def test_llm_batch_llm_error_raises(tmp_db, monkeypatch):
+    """LlmError propagates: the CALLER decides the fallback semantics."""
+    chat = FakeChat([LlmError("provider down")])
+    monkeypatch.setattr(llm_mod, "cached_chat_json", chat)
+    with pytest.raises(LlmError):
+        await translate_svc.translate_llm_batch(
+            tmp_db, LLM_CFG, [(0, "A sentence")]
+        )
+
+
+@pytest.mark.asyncio
+async def test_llm_batch_locale_parameter_rendered_for_any_locale(tmp_db, monkeypatch):
+    """translate.batch is one locale-less registry entry (§7.4: the
+    output is Chinese regardless of UI locale): both locale values
+    render the same prompt."""
+    seen = []
+
+    async def echo_chat(conn, cfg, messages, *, task, **kwargs):
+        seen.append(messages[-1]["content"])
+        return {"items": []}, None, False
+
+    monkeypatch.setattr(llm_mod, "cached_chat_json", echo_chat)
+    for loc in ("zh", "en"):
+        await translate_svc.translate_llm_batch(
+            tmp_db, LLM_CFG, [(0, "A sentence")], locale=loc
+        )
+    assert len(seen) == 2
+    assert seen[0] == seen[1]
+    assert "0. A sentence" in seen[0]

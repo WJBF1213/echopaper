@@ -45,9 +45,18 @@ Migration and split notes
   spells out the scene JSON schema and every hard-validation rule the
   backend enforces (canvas bounds, unique ids, continuous blank_slot
   numbering, the >= 8 node distance, per-node evidence). It ends with
-  the same refusal guidance: spatial sentences that do not cohere into
-  a scene return ``refused`` instead of a forced scene. Adding the pair
+  the same refusal guidance: spatial sentences that do not cohere into a
+  scene return ``refused`` instead of a forced scene. Adding the pair
   moved ``PROMPTS_VERSION`` 2 -> 3 (scene cache keys change with it).
+
+* ``translate.batch`` (Task 22, design §7.2): the pipeline's LLM-first
+  batch translation prompt. Deliberately a SINGLE locale-less entry --
+  the translation target is Simplified Chinese regardless of the UI
+  locale (§7.4) -- served to every locale by :func:`render_prompt`'s
+  locale-less fallback. It receives the numbered sentence block and
+  instructs the ``{"items":[{"i":n,"t":"..."}]}`` JSON-only reply.
+  Adding it moved ``PROMPTS_VERSION`` 3 -> 4 (translate cache keys
+  change with it).
 
 Rendering performs LITERAL ``str.replace`` per variable — never
 ``str.format`` or f-strings — because templates and variable values are
@@ -66,7 +75,7 @@ from dataclasses import dataclass
 from app import db
 from app.services.exam_presets import QUESTION_TYPES
 
-PROMPTS_VERSION: int = 3
+PROMPTS_VERSION: int = 4
 
 #: settings-table key holding the ``{prompt_key: override_text}`` JSON dict.
 OVERRIDE_SETTING_KEY = "prompt_overrides"
@@ -209,6 +218,24 @@ Return a JSON object only, no prose:
 {"kind":"map","scene":{"canvas":{"width":100,"height":70},"nodes":[{"id":"entrance","label":"Entrance","x":50,"y":66,"shape":"rect","fixed":true,"evidence":[{"i0":3,"i1":6,"quote":"..."}]},{"id":"n1","x":20,"y":30,"shape":"circle","blank_slot":1,"evidence":[{"i0":13,"i1":15,"quote":"..."}]}],"paths":[{"from":"entrance","to":"n1","label":"Main Path"}]}}
 
 If these sentences do not cohere into one scene (contradictory positions or not enough information), do not force it — return {"refused": true, "reason": "one-line reason"}."""
+
+# Batch translation (design §7.2, Task 22). One locale-less entry: the
+# output language is Simplified Chinese no matter which locale the UI
+# runs in (§7.4), so locale variants would only fork the prompt for no
+# benefit. The sentence block arrives pre-numbered by sentence_index.
+
+_TRANSLATE_BATCH = """Translate each numbered English sentence below into natural, fluent Simplified Chinese (the material is IELTS listening audio; everyday spoken register, no written-formal stiffness).
+
+Rules:
+- One translation per sentence. Keep the sentence number unchanged; never merge, split, reorder or skip sentences.
+- Keep numbers, names, places and technical terms accurate.
+- Translate the meaning naturally; no explanations, no notes, do not echo the original English.
+
+Sentences:
+{{sentences}}
+
+Return JSON only, no prose: {"items": [{"i": <sentence number>, "t": "<Simplified Chinese translation>"}]}"""
+
 
 #: type key -> (rules zh, rules en). Every text ends with its refusal
 #: paragraph (design §4.5); the parenthetical examples are adapted per
@@ -422,6 +449,14 @@ ALL_PROMPTS: tuple[PromptSpec, ...] = (
         variables=("sentences", "count"),
         default=_SCENE_USER_EN,
     ),
+    PromptSpec(
+        key="translate.batch",
+        title_zh="批量翻译（精听管线）",
+        title_en="Batch translation (listening pipeline)",
+        category="translate",
+        variables=("sentences",),
+        default=_TRANSLATE_BATCH,
+    ),
 ) + _rule_specs()
 
 _BY_KEY: dict[str, PromptSpec] = {spec.key: spec for spec in ALL_PROMPTS}
@@ -470,13 +505,23 @@ def render_prompt(
     """Render ``f"{base_key}.{locale}"`` with literal ``{{var}}`` replacement.
 
     Never uses ``str.format``: templates and values are full of JSON braces.
-    Raises :class:`PromptError` when the key is unknown, when the caller
-    passes variables the spec does not declare (or omits declared ones), or
-    when the effective template (override if set, else default) lacks a
-    declared ``{{variable}}`` placeholder.
+    Locale-less entries (keys without a ``.<locale>`` suffix, e.g.
+    ``translate.batch``) serve every locale: when ``{base_key}.{locale}``
+    is unknown but ``base_key`` itself is registered, the plain key is
+    rendered unchanged (§7.4 -- the translation prompt targets Chinese
+    output regardless of UI locale). Raises :class:`PromptError` when
+    the key is unknown, when the caller passes variables the spec does
+    not declare (or omits declared ones), or when the effective template
+    (override if set, else default) lacks a declared ``{{variable}}``
+    placeholder.
     """
     key = f"{base_key}.{locale}"
-    spec = _lookup(key)
+    spec = _BY_KEY.get(key)
+    if spec is None and base_key in _BY_KEY:
+        key = base_key
+        spec = _BY_KEY[key]
+    if spec is None:
+        raise PromptError(f"Unknown prompt key: {key!r}")
     extra = sorted(set(variables) - set(spec.variables))
     if extra:
         raise PromptError(

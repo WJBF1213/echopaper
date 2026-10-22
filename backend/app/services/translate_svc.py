@@ -1,6 +1,9 @@
-"""Sentence translation service (Task B11): gtx -> MyMemory -> LLM.
+"""Sentence translation service: gtx -> MyMemory -> LLM, plus the
+redesign §7.2 LLM-first batch channel ``translate_llm_batch`` used by
+the ingestion pipeline (the per-sentence channels remain its fallback).
 
-Results cached in the translations table keyed by source-text hash.
+Results cached in the translations table keyed by source-text hash
+(the text itself derived via ``normalize.sentence_text``, §7.1).
 httpx only; the DB connection is injected (module default wired at
 app startup), so the logic stays unit-testable.
 """
@@ -12,11 +15,15 @@ from datetime import datetime, timezone
 import httpx
 
 from app import db, i18n
-from app.services import llm, normalize
+from app.services import llm, normalize, prompts
 
 GTX_URL = "https://translate.googleapis.com/translate_a/single"
 MYMEMORY_URL = "https://api.mymemory.translated.net/get"
 GTX_TIMEOUT_S = 6.0
+
+#: sentences per LLM batch call (design §7.2: ~20 keeps a reply inside
+#: max_tokens=4096's natural constraint)
+TRANSLATE_BATCH_SIZE = 20
 
 
 class TranslateError(Exception):
@@ -154,3 +161,66 @@ async def translate_sentence(
     """
     text = normalize.sentence_text(words_json, start, end)
     return await translate(text, llm_cfg=llm_cfg, conn=conn, client=client)
+
+
+def lookup_cached(conn, text: str) -> str | None:
+    """Public translations-cache read (the pipeline's §7.2 pre-check:
+    a sentence already translated for another material is reused and
+    never sent to the LLM again)."""
+    return _lookup(conn, text)
+
+
+async def translate_llm_batch(
+    conn,
+    cfg,
+    sentences: list[tuple[int, str]],
+    *,
+    locale: str = "zh",
+    client=None,
+) -> dict[int, str]:
+    """LLM-first numbered-sentence batch translation (design §7.2).
+
+    ``sentences`` are ``(sentence_index, text)`` pairs whose text the
+    CALLER already derived via ``normalize.sentence_text`` (§7.1). The
+    list is split into ``TRANSLATE_BATCH_SIZE`` chunks and each chunk is
+    ONE ``llm.cached_chat_json`` call (task=``translate``) over the
+    ``translate.batch`` prompt, replying ``{"items": [{"i": int,
+    "t": str}]}``. Sentences the model omitted -- or answered with junk
+    (unknown ``i``, blank ``t``, non-dict item) -- are simply absent
+    from the returned dict; the caller decides the fallback. Any chunk
+    failure raises :class:`llm.LlmError` (caller decides the fallback).
+
+    ``locale`` only picks the prompt template's language. The
+    ``translate.batch`` registry entry is deliberately locale-less
+    (§7.4): the output is Simplified Chinese for every locale.
+    """
+    out: dict[int, str] = {}
+    for i in range(0, len(sentences), TRANSLATE_BATCH_SIZE):
+        chunk = sentences[i : i + TRANSLATE_BATCH_SIZE]
+        numbered = "\n".join(f"{idx}. {text}" for idx, text in chunk)
+        messages = [
+            {"role": "system", "content": i18n.t("translate.system")},
+            {
+                "role": "user",
+                "content": prompts.render_prompt(
+                    conn, "translate.batch", locale, sentences=numbered
+                ),
+            },
+        ]
+        obj, _usage, _from_cache = await llm.cached_chat_json(
+            conn, cfg, messages, task="translate", client=client,
+        )
+        wanted = {idx for idx, _ in chunk}
+        for item in obj.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("i")
+            text = str(item.get("t") or "").strip()
+            if (
+                isinstance(idx, int)
+                and not isinstance(idx, bool)
+                and idx in wanted
+                and text
+            ):
+                out[idx] = text
+    return out
