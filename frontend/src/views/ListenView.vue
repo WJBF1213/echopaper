@@ -97,6 +97,10 @@ function playSentence(index: number) {
   const times = sentenceTimeRange(m.words, { start: row.start, end: row.end })
   const first = m.words[row.start]
   if (!times || !first) return
+  // Single-sentence playback replaces 单句循环: a stale AB loop would
+  // wrap playback back to its own span and the click would never play
+  // (usePlayer.onTimeUpdate seeks to abA once currentTime >= abB).
+  clearAb()
   playRange.value = { start: blankSeekTime(first.s), end: times.b }
   seek(playRange.value.start, true)
 }

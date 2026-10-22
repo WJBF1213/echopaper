@@ -167,6 +167,41 @@ describe('ListenView sentence list', () => {
     wrapper.unmount()
   })
 
+  it('clears a stale AB loop when playing a clicked sentence', async () => {
+    const wrapper = await mountView()
+    const audio = wrapper.find('audio').element as HTMLAudioElement
+    // 精听 core flow: loop a hard sentence, then move on by clicking the
+    // next one. The old loop must not hijack the clicked sentence.
+    await wrapper.findAll('.sent-row')[1].find('button.loop').trigger('click')
+    expect(wrapper.findComponent(PlayerBar).props('abA')).toBeCloseTo(4.0)
+    vi.mocked(audio.play).mockClear()
+    vi.mocked(audio.pause).mockClear()
+
+    await wrapper.findAll('.sent-main')[2].trigger('click')
+    // Seek landed at sentence 2's start (6.0 − 1.5 = 4.5), autoplaying.
+    expect(audio.currentTime).toBeCloseTo(4.5)
+    expect(audio.play).toHaveBeenCalled()
+    // The AB points are cleared (mutual exclusion with 单句循环).
+    const bar = wrapper.findComponent(PlayerBar)
+    expect(bar.props('abA')).toBeNull()
+    expect(bar.props('abB')).toBeNull()
+
+    // Crossing the old loop's B (5.15) no longer wraps playback to abA...
+    audio.currentTime = 5.2
+    audio.dispatchEvent(new Event('timeupdate'))
+    await flushPromises()
+    expect(audio.currentTime).toBeCloseTo(5.2)
+    // ...and the clicked sentence is not cut short by a stale range.
+    expect(audio.pause).not.toHaveBeenCalled()
+
+    // The stop-at-end watch still ends the clicked sentence at its end.
+    audio.currentTime = 7.0
+    audio.dispatchEvent(new Event('timeupdate'))
+    await flushPromises()
+    expect(audio.pause).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('highlights the current playing word inside its sentence', async () => {
     const wrapper = await mountView()
     await tick(wrapper, 4.2) // inside "Good" (4.0-4.3)
