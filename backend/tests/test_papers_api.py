@@ -8,6 +8,13 @@ Editing the transcript marks every paper of the material stale=1 (still
 fetchable). ``regenerate`` now derives its variation marker from the
 REAL persisted paper count (the deferred T10 covering test). Map items
 carry an explicit ``slot`` field end to end (T13 review rider).
+
+Task 15 adds the answering loop: ``POST /papers/{id}/attempts`` grades
+server-side and persists ``paper_attempts``/``paper_attempt_items``;
+``GET /papers/{id}/attempts`` + ``GET /attempts/{attemptId}`` read the
+history back; ``GET /papers/{id}/stats`` gives per-item accuracy (zero-
+attempt items included) and the redesigned ``GET /api/stats`` aggregates
+by item type across all papers.
 """
 from __future__ import annotations
 
@@ -432,6 +439,252 @@ def _map_llm(monkeypatch, conn, mid, matching):
         "scene": make_scene(words),
         "exam:map_labelling": matching,
     })
+
+
+# ------------------------------------------- attempts + stats (Task 15)
+
+# A minimal stored-shape paper with every answer kind, for the grading /
+# persistence / stats endpoints. Inserted directly so the tests pin the
+# API contract without re-stubbing the whole generation pipeline.
+_MIXED_ITEMS = [
+    {"number": 1, "type": "mcq_single", "answer": "B",
+     "options": ["one", "two", "three"], "alternatives": []},
+    {"number": 2, "type": "mcq_multi", "answer": "A,C", "alternatives": []},
+    {"number": 3, "type": "completion", "answer": "well-known",
+     "alternatives": ["well known"]},
+    {"number": 4, "type": "matching", "answer": "D", "alternatives": []},
+]
+
+
+def _craft_paper(conn, mid, items, group_type="mixed") -> str:
+    """Insert a papers row directly with a full-shape paper JSON; returns
+    its id (attempts/stats read paper_json, never the generation path)."""
+    from app.services.jobs import _uid, _now
+
+    paper_id = _uid()
+    paper = {
+        "material_id": mid,
+        "total_items": len(items),
+        "warnings": [],
+        "groups": [{
+            "type": group_type, "title": "Crafted", "instruction": "",
+            "options": [], "partial": False, "visual": None, "items": items,
+        }],
+    }
+    with conn:
+        conn.execute(
+            "INSERT INTO papers(id,material_id,spec_json,paper_json,"
+            "created_at) VALUES(?,?,?,?,?)",
+            (paper_id, mid, json.dumps({"blocks": []}),
+             json.dumps(paper), _now()),
+        )
+    return paper_id
+
+
+def _submit(client, paper_id, answers: dict) -> dict:
+    res = client.post(
+        f"/api/papers/{paper_id}/attempts", json={"answers": answers}
+    )
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+def test_submit_attempt_on_generated_paper(client, tmp_db, monkeypatch):
+    """End-to-end on the real generation path: submit -> server-side
+    grading -> rows in paper_attempts/paper_attempt_items."""
+    mid = _seed(tmp_db)
+    _completion_llm(monkeypatch, tmp_db, mid)
+    paper_id = client.post(
+        f"/api/materials/{mid}/exam",
+        json={"blocks": [{"type": "completion", "count": 1}]},
+    ).json()["paper_id"]
+
+    data = _submit(client, paper_id, {"1": " passport "})
+    assert set(data) == {"attempt_id", "created_at", "items"}
+    item = data["items"][0]
+    assert item == {
+        "item_number": 1,
+        "item_type": "completion",
+        "user_answer": " passport ",
+        "correct": True,
+        "expected": "passport",
+    }
+    rows = tmp_db.execute(
+        "SELECT attempt_id, item_number, item_type, user_answer, correct,"
+        " expected FROM paper_attempt_items"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["attempt_id"] == data["attempt_id"]
+    assert rows[0]["correct"] == 1
+    assert rows[0]["expected"] == "passport"
+    attempt = tmp_db.execute(
+        "SELECT paper_id, material_id FROM paper_attempts WHERE id=?",
+        (data["attempt_id"],),
+    ).fetchone()
+    assert attempt["paper_id"] == paper_id
+    assert attempt["material_id"] == mid
+
+
+def test_submit_attempt_grades_every_answer_kind(client, tmp_db):
+    mid = _seed(tmp_db)
+    paper_id = _craft_paper(tmp_db, mid, _MIXED_ITEMS)
+
+    data = _submit(client, paper_id, {
+        "1": "b",          # letter, case-insensitive
+        "2": "C,A",        # multi, order-insensitive
+        "3": "Well- Known",  # span, hyphen shape normalized
+        "4": "A",          # matching, wrong letter
+    })
+    by_num = {i["item_number"]: i for i in data["items"]}
+    assert [by_num[n]["correct"] for n in (1, 2, 3, 4)] == [
+        True, True, True, False,
+    ]
+    assert by_num[3]["expected"] == "well-known"
+    # user_answer round-trips exactly as submitted.
+    assert by_num[1]["user_answer"] == "b"
+    # Persisted flags match the response.
+    flags = {
+        r["item_number"]: r["correct"]
+        for r in tmp_db.execute(
+            "SELECT item_number, correct FROM paper_attempt_items"
+        )
+    }
+    assert flags == {1: 1, 2: 1, 3: 1, 4: 0}
+
+
+def test_submit_attempt_missing_and_unknown_answers(client, tmp_db):
+    mid = _seed(tmp_db)
+    paper_id = _craft_paper(tmp_db, mid, _MIXED_ITEMS)
+
+    # Unanswered items grade wrong with user_answer None; answers for
+    # item numbers that do not exist are ignored (never a 422).
+    data = _submit(client, paper_id, {"4": "D", "99": "Z"})
+    by_num = {i["item_number"]: i for i in data["items"]}
+    assert sorted(by_num) == [1, 2, 3, 4]
+    assert by_num[1]["user_answer"] is None
+    assert by_num[1]["correct"] is False
+    assert by_num[4]["correct"] is True
+    assert tmp_db.execute(
+        "SELECT COUNT(*) FROM paper_attempt_items"
+    ).fetchone()[0] == 4
+
+    # A wholly empty submission is still a valid attempt.
+    empty = _submit(client, paper_id, {})
+    assert [i["correct"] for i in empty["items"]] == [False] * 4
+
+
+def test_attempts_404_on_unknown_paper(client, tmp_db):
+    assert client.post(
+        "/api/papers/missing/attempts", json={"answers": {"1": "A"}}
+    ).status_code == 404
+    assert client.get("/api/papers/missing/attempts").status_code == 404
+    assert client.get("/api/papers/missing/stats").status_code == 404
+
+
+def test_list_attempts_newest_first_with_item_count(client, tmp_db):
+    mid = _seed(tmp_db)
+    paper_id = _craft_paper(tmp_db, mid, _MIXED_ITEMS)
+    first = _submit(client, paper_id, {"1": "B"})
+    second = _submit(client, paper_id, {"1": "B", "2": "A,C"})
+
+    res = client.get(f"/api/papers/{paper_id}/attempts")
+    assert res.status_code == 200, res.text
+    listing = res.json()
+    assert [a["id"] for a in listing] == [second["attempt_id"], first["attempt_id"]]
+    assert set(listing[0]) == {"id", "created_at", "item_count"}
+    assert listing[0]["item_count"] == 4
+    assert listing[0]["created_at"]
+
+    # Isolated per paper: a second paper's attempts never leak in.
+    other_id = _craft_paper(tmp_db, mid, _MIXED_ITEMS[:1])
+    _submit(client, other_id, {"1": "B"})
+    assert len(client.get(f"/api/papers/{other_id}/attempts").json()) == 1
+    assert len(client.get(f"/api/papers/{paper_id}/attempts").json()) == 2
+
+
+def test_attempt_detail_roundtrip(client, tmp_db):
+    mid = _seed(tmp_db)
+    paper_id = _craft_paper(tmp_db, mid, _MIXED_ITEMS)
+    data = _submit(client, paper_id, {"2": "C,A"})
+
+    res = client.get(f"/api/attempts/{data['attempt_id']}")
+    assert res.status_code == 200, res.text
+    detail = res.json()
+    assert set(detail) == {"id", "paper_id", "material_id", "created_at", "items"}
+    assert detail["id"] == data["attempt_id"]
+    assert detail["paper_id"] == paper_id
+    assert detail["material_id"] == mid
+    assert detail["created_at"]
+    assert [i["item_number"] for i in detail["items"]] == [1, 2, 3, 4]
+    item2 = detail["items"][1]
+    assert item2 == {
+        "item_number": 2,
+        "item_type": "mcq_multi",
+        "user_answer": "C,A",
+        "correct": True,
+        "expected": "A,C",
+    }
+    assert client.get("/api/attempts/missing").status_code == 404
+
+
+def test_paper_stats_per_item_accuracy(client, tmp_db):
+    """The review page's main data: every item of the paper appears,
+    zero-attempt items included; two attempts -> per-item attempts=2."""
+    mid = _seed(tmp_db)
+    paper_id = _craft_paper(tmp_db, mid, _MIXED_ITEMS)
+
+    # Fresh paper: all items present with zero attempts.
+    fresh = client.get(f"/api/papers/{paper_id}/stats").json()
+    assert fresh == [
+        {"item_number": 1, "item_type": "mcq_single", "attempts": 0, "correct": 0},
+        {"item_number": 2, "item_type": "mcq_multi", "attempts": 0, "correct": 0},
+        {"item_number": 3, "item_type": "completion", "attempts": 0, "correct": 0},
+        {"item_number": 4, "item_type": "matching", "attempts": 0, "correct": 0},
+    ]
+
+    _submit(client, paper_id, {"1": "B"})  # item 1 right
+    _submit(client, paper_id, {"1": "B", "2": "A,C", "3": "wrong"})
+
+    stats = client.get(f"/api/papers/{paper_id}/stats").json()
+    assert [(s["attempts"], s["correct"]) for s in stats] == [
+        (2, 2),  # 1: right twice
+        (2, 1),  # 2: right once
+        (2, 0),  # 3: never right
+        (2, 0),  # 4: never answered
+    ]
+    assert all(set(s) == {"item_number", "item_type", "attempts", "correct"}
+               for s in stats)
+
+
+def test_global_stats_by_type_across_papers(client, tmp_db):
+    mid = _seed(tmp_db)
+    paper_a = _craft_paper(tmp_db, mid, _MIXED_ITEMS)
+    paper_b = _craft_paper(tmp_db, mid, [
+        {"number": 1, "type": "completion", "answer": "cafe",
+         "alternatives": []},
+    ])
+
+    assert client.get("/api/stats").json() == []  # nothing anywhere yet
+
+    _submit(client, paper_a, {"1": "B", "2": "A,C", "3": "well known"})
+    _submit(client, paper_a, {"1": "X"})  # everything wrong
+    _submit(client, paper_b, {"1": "CAFE"})
+
+    res = client.get("/api/stats")
+    assert res.status_code == 200, res.text
+    rows = {r["item_type"]: r for r in res.json()}
+    assert set(rows) == {"mcq_single", "mcq_multi", "completion", "matching"}
+    assert rows["mcq_single"] == {
+        "item_type": "mcq_single", "attempts": 2, "correct": 1,
+        "accuracy": 0.5,
+    }
+    # completion aggregates across BOTH papers (2 + 1 items x attempts).
+    assert rows["completion"]["attempts"] == 3
+    assert rows["completion"]["correct"] == 2
+    assert rows["completion"]["accuracy"] == round(2 / 3, 4)
+    assert rows["matching"] == {
+        "item_type": "matching", "attempts": 2, "correct": 0, "accuracy": 0.0,
+    }
 
 
 def test_map_items_carry_explicit_slot_in_persisted_paper(

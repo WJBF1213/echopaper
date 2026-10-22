@@ -108,6 +108,18 @@ class AttemptIn(BaseModel):
     duration_s: Optional[float] = None
 
 
+class PaperAttemptIn(BaseModel):
+    """POST /api/papers/{id}/attempts body (design §5.2, Task 15).
+
+    ``answers`` maps the item number (a JSON object key, hence a string)
+    to the candidate's answer string: a letter, comma-joined letters for
+    multi-answer items, or free text for span items. Keys matching no
+    item number of the paper are ignored; missing items grade wrong.
+    """
+
+    answers: dict[str, str] = Field(default_factory=dict)
+
+
 class DictationItemIn(BaseModel):
     word_index: int
     text: str = ""

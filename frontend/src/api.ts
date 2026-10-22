@@ -459,6 +459,61 @@ export interface GenerateExamResult {
   skipped: SkippedBlock[]
 }
 
+/* ----------------------------------------------- paper attempts (§5.2, T15) */
+
+/** One graded item of a paper attempt: the item's number/type, the
+ * answer as submitted (null when unanswered), the verdict and the
+ * stored answer in display form. */
+export interface PaperAttemptItem {
+  item_number: number
+  item_type: string
+  user_answer: string | null
+  correct: boolean
+  expected: string
+}
+
+/** POST /api/papers/{id}/attempts result: the new attempt's id plus the
+ * per-item grading. No score is persisted (design §5.1). */
+export interface PaperAttemptResult {
+  attempt_id: string
+  created_at: string
+  items: PaperAttemptItem[]
+}
+
+/** One row of GET /api/papers/{id}/attempts (newest first). */
+export interface PaperAttemptSummary {
+  id: string
+  created_at: string
+  item_count: number
+}
+
+/** GET /api/attempts/{id}: one attempt's full per-item detail. */
+export interface PaperAttemptDetail {
+  id: string
+  paper_id: string
+  material_id: string
+  created_at: string
+  items: PaperAttemptItem[]
+}
+
+/** One row of GET /api/papers/{id}/stats: per-item accuracy; every item
+ * of the paper appears, unanswered ones with attempts=0 (review page). */
+export interface PaperItemStat {
+  item_number: number
+  item_type: string
+  attempts: number
+  correct: number
+}
+
+/** One row of the redesigned GET /api/stats: by-type accuracy across
+ * all papers (score-free, design §5.2). */
+export interface TypeStat {
+  item_type: string
+  attempts: number
+  correct: number
+  accuracy: number
+}
+
 export interface CreateMaterialInput {
   name: string
   audioFile?: File | null
@@ -607,4 +662,25 @@ export const api = {
   getPaper: (id: string) => request<PaperDetail>(`/papers/${id}`),
   deletePaper: (id: string) =>
     request<void>(`/papers/${id}`, { method: 'DELETE' }),
+
+  /* -------------------------------------- paper attempts + stats (§5.2) */
+
+  /** Submit answers for server-side grading; numeric keys serialize as
+   * the endpoint's string-keyed answers object automatically. */
+  submitPaperAttempt: (paperId: string, answers: Record<number, string>) =>
+    request<PaperAttemptResult>(
+      `/papers/${paperId}/attempts`,
+      jsonInit('POST', { answers }),
+    ),
+  /** The paper's attempts, newest first, with item counts. */
+  listPaperAttempts: (paperId: string) =>
+    request<PaperAttemptSummary[]>(`/papers/${paperId}/attempts`),
+  /** One attempt's per-item detail (single-attempt review). */
+  getAttempt: (attemptId: string) =>
+    request<PaperAttemptDetail>(`/attempts/${attemptId}`),
+  /** Per-item accuracy for one paper; zero-attempt items included. */
+  paperStats: (paperId: string) =>
+    request<PaperItemStat[]>(`/papers/${paperId}/stats`),
+  /** By-type accuracy across all papers (redesigned /stats). */
+  globalStats: () => request<TypeStat[]>('/stats'),
 }

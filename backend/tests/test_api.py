@@ -594,7 +594,8 @@ def test_translate_endpoint(tmp_db, client, monkeypatch):
 
 
 def test_stats(tmp_db, client):
+    """Redesigned /api/stats (design §5.2): by-type accuracy rows over
+    paper_attempt_items -- an empty list until a paper is answered."""
     r = client.get("/api/stats")
     assert r.status_code == 200
-    body = r.json()
-    assert body["materials"] == 0 and body["attempts"] == 0
+    assert r.json() == []

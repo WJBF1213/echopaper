@@ -29,6 +29,7 @@ from app.routers import (
     review as review_router,
     sets as sets_router,
     settings as settings_router,
+    stats as stats_router,
     translate as translate_router,
 )
 from app.services import engines, jobs as jobs_svc, translate_svc
@@ -121,6 +122,8 @@ def create_app(
     app.include_router(asr_router.router, prefix="/api")
     app.include_router(materials_router.router, prefix="/api")
     app.include_router(papers_router.router, prefix="/api")
+    # redesigned by-type stats on the same /api/stats path (T15)
+    app.include_router(stats_router.router, prefix="/api")
     app.include_router(batches_router.router, prefix="/api")
     app.include_router(sets_router.router, prefix="/api")
     app.include_router(attempts_router.router, prefix="/api")

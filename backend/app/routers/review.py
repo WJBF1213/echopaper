@@ -1,4 +1,12 @@
-"""Review API: cross-material wrong-word book + overall stats (spec §8)."""
+"""Review API: cross-material wrong-word book (spec §8).
+
+The old ``GET /api/stats`` handler (avg score over the legacy attempts
+table) moved out in Task 15: the redesign drops scores (design §5.1)
+and the by-type accuracy implementation now lives in
+``routers/stats.py``. The wrong-words book below still reads the legacy
+tables until the review endpoints are rebuilt on paper_attempt_items
+(design §5.2, P19).
+"""
 from __future__ import annotations
 
 import json
@@ -72,19 +80,3 @@ def wrong_words(request: Request):
         items.values(), key=lambda x: (-x["times_wrong"], x["word"])
     )
     return out
-
-
-@router.get("/stats")
-def stats(request: Request):
-    conn = request.app.state.conn
-    materials = conn.execute("SELECT COUNT(*) c FROM materials").fetchone()["c"]
-    attempts = conn.execute("SELECT COUNT(*) c FROM attempts").fetchone()["c"]
-    avg = conn.execute(
-        "SELECT AVG(CAST(ok AS REAL)/total) v FROM attempts"
-        " WHERE total > 0"
-    ).fetchone()["v"]
-    return {
-        "materials": materials,
-        "attempts": attempts,
-        "avg_score": round(avg, 4) if avg is not None else None,
-    }
