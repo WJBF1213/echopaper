@@ -14,6 +14,15 @@ class LlmSettingsIn(BaseModel):
     max_context_tokens: Optional[int] = None
 
 
+class LlmTestIn(BaseModel):
+    """Optional overrides: test exactly what the settings form shows."""
+
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = None  # blank keeps the stored key
+
+
 class AsrSettingsIn(BaseModel):
     engine: Optional[str] = None
     parakeet_model: Optional[str] = None

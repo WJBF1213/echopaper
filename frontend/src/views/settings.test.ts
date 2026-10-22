@@ -114,10 +114,42 @@ describe('SettingsView', () => {
   it('reports LLM connection test result', async () => {
     mocked.testLlm.mockResolvedValue({ ok: true, message: '连接正常' })
     const wrapper = await mountView()
-    const testBtn = wrapper.findAll('button').find((b) => b.text().includes('测试连接'))
+    const testBtn = wrapper.findAll('button').find((b) => b.text().includes('保存并测试'))
     await testBtn!.trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('连接正常')
+    wrapper.unmount()
+  })
+
+  it('saves the typed key before testing it', async () => {
+    mocked.testLlm.mockResolvedValue({ ok: true, message: '连接正常' })
+    const wrapper = await mountView()
+    // Pick DeepSeek so the form holds provider + endpoint the backend has not seen.
+    const providerSelect = wrapper.findAll('select')[0]
+    await providerSelect.setValue('deepseek')
+    await wrapper.find('input[type="password"]').setValue('sk-typed-in-form')
+
+    const testBtn = wrapper.findAll('button').find((b) => b.text().includes('保存并测试'))
+    await testBtn!.trigger('click')
+    await flushPromises()
+
+    // Saving first is what makes a typed-but-unsaved key actually usable.
+    expect(mocked.updateSettings).toHaveBeenCalledWith({
+      llm: expect.objectContaining({
+        provider: 'deepseek',
+        base_url: 'https://api.deepseek.com/v1',
+        model: 'deepseek-chat',
+        api_key: 'sk-typed-in-form',
+      }),
+    })
+    expect(mocked.testLlm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: 'deepseek',
+        api_key: 'sk-typed-in-form',
+      }),
+    )
+    // The key is cleared once stored, so the masked placeholder shows again.
+    expect((wrapper.find('input[type="password"]').element as HTMLInputElement).value).toBe('')
     wrapper.unmount()
   })
 })

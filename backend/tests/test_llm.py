@@ -27,7 +27,7 @@ class FakeResponse:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise llm.httpx.HTTPStatusError("err", request=None, response=None)
+            raise llm.httpx.HTTPStatusError("err", request=None, response=self)
 
     def json(self):
         return self._payload
@@ -181,3 +181,16 @@ async def test_test_connection_failure():
     ok_flag, msg = await llm.test_connection(CFG, client=client)
     assert ok_flag is False
     assert msg
+
+
+@pytest.mark.asyncio
+async def test_test_connection_surfaces_provider_error_body():
+    """A rejected key/model must show the provider's reason, not just 401."""
+    resp = FakeResponse(
+        {"error": {"message": "Authentication Fails, Your api key is invalid"}},
+        status=401,
+    )
+    ok_flag, msg = await llm.test_connection(CFG, client=FakeClient([resp]))
+    assert ok_flag is False
+    assert "401" in msg
+    assert "api key is invalid" in msg

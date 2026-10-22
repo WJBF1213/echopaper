@@ -30,13 +30,22 @@
 - **原文时间戳与直接回放**：材料详情与练习页的原文按句分行，**每句开头显示句首时间戳**（可隐藏）；点击时间戳从该句开头播放并 AB 循环，点击任意单词从该词播放，播放中的词实时高亮。练习时点题号仍会跳到答案词前 1.5 秒并循环整句；纯文本材料（无词级时间戳）不显示时间戳、不响应点击。
 - **转写对齐**：上传音频同时粘贴官方原文时，原文为题目权威文本、时间戳从 ASR 词映射（difflib 词级对齐，插入词插值）；事后 `PUT /api/materials/{id}/transcript` 可编辑转写并重锚定（旧题集标 stale 保留历史）。
 
+## LLM 配置与排错
+
+设置页的密钥只写不读，保存在本机 `data/app.db`（也可用 `.env` 的 `LLM_API_KEY` 预置）。填好服务商/接口地址/模型/密钥后：
+
+- 点 **保存并测试**：先落库再发一次真实请求。只在输入框敲了 key 但没保存时，后端仍然读不到它——旧版「测试连接」因此会误报“未配置 LLM API key”，现在不会了。
+- 测试失败时显示服务商返回的原始原因（如 `HTTP 401: Authentication Fails …`、`Model Not Exist`），按提示改密钥或模型名即可。
+- 常见原因：模型名不存在（DeepSeek 用 `deepseek-chat` / `deepseek-reasoner`）、接口地址少了或多了 `/v1`、余额不足、代理/网络不通。
+- 不配置 key 也能用：出题自动降级为程序化名词档（`nouns`），只是题目质量不如 LLM 档。
+
 ## API 快览（完整契约见设计文档 §8）
 
 ```
 GET  /api/health                      健康检查
 GET  /api/asr/status | POST load/unload    引擎状态/手动加载/立即卸载
 GET|PUT /api/settings                 LLM(provider/key/model) 与 ASR 配置（key 只写不读）
-POST /api/settings/test-llm           LLM 连通性测试
+POST /api/settings/test-llm           LLM 连通性测试（可携带表单中尚未保存的配置）
 POST /api/materials                   新建材料（multipart）→ {job_id}
 POST /api/materials/batch             批量导入音频（multipart 字段 audios，可多个）→ {batch_id, jobs[]}
 GET  /api/batches[/{id}]              批次历史 / 批次总进度 + 逐文件状态
@@ -55,10 +64,10 @@ POST /api/translate                   逐句中译（gtx→MyMemory→LLM 兜底
 
 ```bash
 python -m venv .venv && .venv/Scripts/pip install -r backend/requirements.txt -r backend/requirements-dev.txt   # macOS 用 .venv/bin/pip
-.venv/Scripts/python -m pytest backend/tests -q        # 141 个测试，全部 mock 引擎/LLM/网络，无需 macOS
+.venv/Scripts/python -m pytest backend/tests -q        # 145 个测试，全部 mock 引擎/LLM/网络，无需 macOS
 cd backend && ../.venv/Scripts/python -m app.main      # 本机起服务（127.0.0.1:8300）
 
-cd frontend && npm install && npm test && npm run build   # 56 个 Vitest；产物 dist/ 入库
+cd frontend && npm install && npm test && npm run build   # 57 个 Vitest；产物 dist/ 入库
 cd frontend && npm run dev                             # 前端热更新（:5173，/api 代理到 :8300）
 ```
 
@@ -72,7 +81,7 @@ macOS-only 依赖（mlx-whisper/parakeet-mlx）带 `sys_platform == "darwin"` �
 4. 转写完成：`GET /api/materials/{id}` 的 `words` 带词级 `s/e` 时间戳。
 5. 批量导入 2-3 个音频：批次进度逐文件更新；全部完成后材料库出现同名材料；`data/audio/` 数量与材料数一致。
 6. 打开材料详情：原文每句前有 `m:ss` 时间戳，点击单词能从该词播放并高亮；练习页同样可见句首时间戳。
-7. 配置 LLM key（智谱免费）→ 生成 llm 题集：blanks 的 answer 均可在 transcript 中逐字找到；无 key 走 nouns 档。
+7. 设置页填好 LLM key 后点「保存并测试」→ 生成 llm 题集：blanks 的 answer 均可在 transcript 中逐字找到；无 key 走 nouns 档。
 8. 转写后空闲 10 分钟：活动监视器确认 Python 内存回落（模型已卸载）；`/api/asr/status` 回到 `unloaded`。
 9. 设置页切引擎 parakeet↔whisper：切换后 status 立即 `unloaded`，下次转写用新引擎。
 10. 重启电脑/重跑启动脚本：材料、题集、成绩、错词本全部还在（`data/` 目录）。
@@ -86,7 +95,7 @@ macOS-only 依赖（mlx-whisper/parakeet-mlx）带 `sys_platform == "darwin"` �
 
 ```
 backend/app/          FastAPI 应用（routers/ + services/，services 不依赖 fastapi 便于移植）
-backend/tests/        141 个 pytest（引擎/LLM/网络全 mock）
+backend/tests/        145 个 pytest（引擎/LLM/网络全 mock）
 frontend/src/         Vue 3 SPA（views/ components/ composables/ lib/）
 frontend/dist/        构建产物（入库，后端静态托管）
 data/                 运行时生成：app.db + audio/

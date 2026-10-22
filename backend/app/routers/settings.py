@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app import db
 from app.config import load_settings
-from app.schemas import SettingsIn
+from app.schemas import LlmTestIn, SettingsIn
 from app.services import llm as llm_mod
 
 router = APIRouter()
@@ -106,10 +106,27 @@ async def put_settings(body: SettingsIn, request: Request):
 
 
 @router.post("/settings/test-llm")
-async def test_llm(request: Request):
+async def test_llm(request: Request, body: LlmTestIn | None = None):
+    """Probe the LLM with the form's current values.
+
+    The settings form can be tested before it is saved, so the request body
+    may override any LLM field. A blank ``api_key`` means "keep using the
+    stored key" rather than "there is no key".
+    """
     settings = effective_settings(request.app.state.conn)
-    cfg = llm_cfg_or_none(settings)
-    if cfg is None:
-        return {"ok": False, "message": "未配置 LLM API key"}
+    cfg = dict(settings["llm"])
+    if body is not None:
+        patch = body.model_dump(exclude_none=True)
+        key = (patch.get("api_key") or "").strip()
+        if key:
+            patch["api_key"] = key
+        else:
+            patch.pop("api_key", None)
+        cfg.update(patch)
+    if not (cfg.get("api_key") or "").strip():
+        return {
+            "ok": False,
+            "message": "未配置 LLM API key：请填写密钥后点击「保存并测试」",
+        }
     ok, message = await llm_mod.test_connection(cfg)
     return {"ok": ok, "message": message}

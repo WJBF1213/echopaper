@@ -474,6 +474,62 @@ def test_settings_key_write_only(tmp_db, client):
     assert stored["api_key"] == "sk-secret-123"
 
 
+def test_settings_test_llm_uses_form_overrides(client, monkeypatch):
+    """Typing a key and testing must work before the form is saved."""
+    from app.services import llm as llm_mod
+
+    captured = {}
+
+    async def fake_test(cfg):
+        captured.update(cfg)
+        return True, "连接正常"
+
+    monkeypatch.setattr(llm_mod, "test_connection", fake_test)
+    r = client.post("/api/settings/test-llm", json={
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-chat",
+        "api_key": "sk-typed-not-saved",
+    })
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "message": "连接正常"}
+    assert captured["api_key"] == "sk-typed-not-saved"
+    assert captured["base_url"] == "https://api.deepseek.com"
+    assert captured["model"] == "deepseek-chat"
+
+
+def test_settings_test_llm_blank_key_falls_back_to_stored(client, monkeypatch):
+    from app.services import llm as llm_mod
+
+    client.put("/api/settings", json={"llm": {
+        "provider": "custom", "base_url": "https://x.example/v1",
+        "model": "my-model", "api_key": "sk-stored"}})
+    captured = {}
+
+    async def fake_test(cfg):
+        captured.update(cfg)
+        return True, "ok"
+
+    monkeypatch.setattr(llm_mod, "test_connection", fake_test)
+    r = client.post("/api/settings/test-llm", json={
+        "base_url": "https://y.example/v1", "api_key": ""})
+    assert r.json()["ok"] is True
+    assert captured["api_key"] == "sk-stored"
+    assert captured["base_url"] == "https://y.example/v1"
+
+
+def test_settings_test_llm_without_any_key(client, monkeypatch):
+    from app.config import Settings
+    from app.routers import settings as settings_router
+
+    monkeypatch.setattr(settings_router, "load_settings", lambda: Settings())
+    r = client.post("/api/settings/test-llm", json={})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "API key" in body["message"]
+
+
 def test_settings_engine_switch_triggers_manager(app, client):
     r = client.put("/api/settings", json={"asr": {"engine": "whisper"}})
     assert r.status_code == 200

@@ -69,18 +69,23 @@ async function load() {
   }
 }
 
+function llmPatch(): NonNullable<SettingsPatch['llm']> {
+  const patch: NonNullable<SettingsPatch['llm']> = {
+    provider: form.provider,
+    base_url: form.baseUrl,
+    model: form.model,
+    max_context_tokens: form.maxContextTokens,
+  }
+  const key = apiKey.value.trim()
+  if (key) patch.api_key = key
+  return patch
+}
+
 async function save() {
   saving.value = true
   try {
-    const llmPatch: NonNullable<SettingsPatch['llm']> = {
-      provider: form.provider,
-      base_url: form.baseUrl,
-      model: form.model,
-      max_context_tokens: form.maxContextTokens,
-    }
-    if (apiKey.value.trim()) llmPatch.api_key = apiKey.value.trim()
     const updated = await api.updateSettings({
-      llm: llmPatch,
+      llm: llmPatch(),
       asr: {
         engine: form.engine,
         parakeet_model: form.parakeetModel,
@@ -103,10 +108,16 @@ async function save() {
 async function testLlm() {
   testing.value = true
   testMessage.value = ''
+  const patch = llmPatch()
   try {
-    const res = await api.testLlm()
+    // Persist first: a key sitting in the input is not configured for the
+    // backend yet, and later question generation reads the stored copy.
+    const updated = await api.updateSettings({ llm: patch })
+    settings.value = updated
+    apiKey.value = ''
+    const res = await api.testLlm(patch)
     testMessage.value = res.message
-    showToast(res.ok ? '连接正常' : res.message, res.ok ? 'info' : 'error')
+    showToast(res.ok ? '连接正常，配置已保存' : res.message, res.ok ? 'info' : 'error')
   } catch (err) {
     testMessage.value = err instanceof Error ? err.message : String(err)
     showToast(testMessage.value, 'error')
@@ -177,10 +188,10 @@ onMounted(load)
         <div class="row" style="margin-top: 14px">
           <button class="ghost small" type="button" :disabled="testing" @click="testLlm">
             <Icon name="spark" :size="13" />
-            {{ testing ? '测试中…' : '测试连接' }}
+            {{ testing ? '测试中…' : '保存并测试' }}
           </button>
           <span class="hint">
-            {{ testMessage || '未配置密钥时使用本地规则出题；长文本会按句分段处理。' }}
+            {{ testMessage || '会先保存上面的模型配置，再发一次真实请求；未配置密钥时使用本地规则出题。' }}
           </span>
         </div>
       </section>

@@ -171,5 +171,17 @@ async def test_connection(
             client=client,
         )
         return True, "连接正常"
+    except httpx.HTTPStatusError as exc:
+        # Providers put the actionable reason in the body ("Model Not Exist",
+        # "Authentication Fails", ...); the bare status line hides it.
+        response = exc.response
+        detail = ""
+        if response is not None:
+            try:
+                detail = json.dumps(response.json(), ensure_ascii=False)
+            except Exception:
+                detail = (getattr(response, "text", "") or "").strip()
+        status = getattr(response, "status_code", "")
+        return False, f"HTTP {status}：{(detail or str(exc))[:300]}"
     except (LlmError, httpx.HTTPError) as exc:
         return False, str(exc)

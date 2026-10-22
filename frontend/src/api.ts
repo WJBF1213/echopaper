@@ -302,7 +302,13 @@ export const api = {
   getSettings: () => request<Settings>('/settings'),
   updateSettings: (patch: SettingsPatch) =>
     request<Settings>('/settings', jsonInit('PUT', patch)),
-  testLlm: () => request<{ ok: boolean; message: string }>('/settings/test-llm', { method: 'POST' }),
+  testLlm: (
+    llm?: Partial<Pick<LlmSettings, 'provider' | 'base_url' | 'model'>> & { api_key?: string },
+  ) =>
+    request<{ ok: boolean; message: string }>(
+      '/settings/test-llm',
+      jsonInit('POST', llm ?? {}),
+    ),
 
   listMaterials: (q = '') =>
     request<MaterialListItem[]>(`/materials${q ? `?q=${encodeURIComponent(q)}` : ''}`),
