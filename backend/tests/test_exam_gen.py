@@ -60,6 +60,18 @@ def as_material(words: list[dict], ranges: list[list[int]], mid: str = "m1") -> 
     }
 
 
+# Spatial-language talk (map precheck, design §4.5): every sentence
+# carries one of the positional cue phrases the map rules text names
+# (in/on the left, next to, opposite, at the bottom, between, ...).
+MAP_TALK = [
+    "Now we are standing at the entrance at the bottom of the plan.",
+    "The gift shop is on the left opposite the ticket desk.",
+    "The cafe is next to the main hall between the two galleries.",
+    "The sculpture garden lies behind the north wing.",
+    "The lecture theatre is at the end of the corridor on the right.",
+]
+
+
 def find_span(words: list[dict], text: str, occurrence: int = 1) -> tuple[int, int]:
     target = text.lower().split()
     tokens = [w["w"].lower().strip(".,!?;:") for w in words]
@@ -556,6 +568,217 @@ def test_generate_result_usage_populated_from_calls(tmp_db):
     }]
 
 
+# ------------------------------------- suitability refusal (design §4.5)
+
+
+def test_refused_response_skips_block_with_one_llm_call(tmp_db):
+    """A refused block-level response skips the block: no chunk retries,
+    no repair round, no deterministic top-up -- exactly one LLM call is
+    spent on the block (design §4.5)."""
+    words, ranges = make_material(LONG)
+    captured = []
+    with pytest.raises(exam_gen.ExamAllRefusedError) as excinfo:
+        run(generate_paper(
+            tmp_db, as_material(words, ranges),
+            [{"type": "mcq_single", "count": 2}],
+            {"api_key": "test"}, lang="zh",
+            chat_fn=fake_cached_chat(
+                [{"refused": True, "reason": "转写缺少可构造干扰项的事实"}],
+                capture=captured,
+            ),
+        ))
+    assert excinfo.value.skipped == [
+        {"type": "mcq_single", "reason": "转写缺少可构造干扰项的事实"}
+    ]
+    # The only block refused -> all-refused signal (the API layer turns
+    # this into 400 with the skipped body). One call, no retry path.
+    assert [c["task"] for c in captured] == ["exam:mcq_single"]
+
+
+def test_refused_flag_alongside_items_is_not_a_refusal(tmp_db):
+    """An items-bearing response never counts as refused, whatever the
+    refused flag says -- refusal is detected structurally, not by the
+    produced count."""
+    words, ranges = make_material(LONG)
+    september = find_span(words, "September")
+    response = {
+        "refused": True,  # ignored: a groups array is an items payload
+        "groups": [{"items": [
+            {"stem": "The flat is available from the first of ______.",
+             "i0": september[0], "i1": september[1], "answer": "September",
+             "word_limit": "ONE WORD ONLY", "layout": "notes"},
+        ]}],
+    }
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 1}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response]),
+    ))
+    assert result.skipped == []
+    assert result.paper["total_items"] == 1
+
+
+def test_mixed_refusal_and_success_keeps_partial_paper(tmp_db):
+    """One block refused + one block succeeding: the successful group
+    stands, and the refused type is listed in skipped with its reason."""
+    words, ranges = make_material(LONG)
+    september_2 = find_span(words, "September", 2)
+    completion = {"groups": [{"items": [
+        {"stem": "The flat is available from the first of ______.",
+         "i0": september_2[0], "i1": september_2[1], "answer": "September",
+         "word_limit": "NO MORE THAN THREE WORDS"},
+    ]}]}
+    captured = []
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "mcq_single", "count": 2}, {"type": "completion", "count": 1}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat(
+            [{"refused": True, "reason": "不适合单选"}, completion],
+            capture=captured,
+        ),
+    ))
+    assert result.skipped == [{"type": "mcq_single", "reason": "不适合单选"}]
+    assert [g["type"] for g in result.paper["groups"]] == ["completion"]
+    assert result.paper["total_items"] == 1
+    assert [c["task"] for c in captured] == [
+        "exam:mcq_single", "exam:completion",
+    ]
+
+
+def test_precheck_short_transcript_skips_without_llm_call(tmp_db):
+    """The min_words precheck refuses the block before any LLM call and
+    lands in skipped with the [precheck] prefix -- no longer a warning."""
+    # 85 words: completion (80) fits, mcq_single (120) does not.
+    words, ranges = make_material(SENTENCES)
+    september = find_span(words, "September")
+    completion = {"groups": [{"items": [
+        {"stem": "The flat is available from the first of ______.",
+         "i0": september[0], "i1": september[1], "answer": "September",
+         "word_limit": "ONE WORD ONLY", "layout": "notes"},
+    ]}]}
+    captured = []
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 1}, {"type": "mcq_single", "count": 2}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([completion], capture=captured),
+    ))
+    assert [g["type"] for g in result.paper["groups"]] == ["completion"]
+    assert len(result.skipped) == 1
+    skip = result.skipped[0]
+    assert skip["type"] == "mcq_single"
+    assert skip["reason"].startswith("[precheck]")
+    assert "120" in skip["reason"] and "词" in skip["reason"]
+    # The old warning-based rejection is gone from the paper.
+    assert all("单选题" not in w for w in result.paper["warnings"])
+    # Zero LLM calls were spent on the floored block.
+    assert [c["task"] for c in captured] == ["exam:completion"]
+
+    # Every block floored -> all-refused signal (the API layer turns this
+    # into 400 with the skipped body), still with zero LLM calls.
+    tiny_words, tiny_ranges = make_material(["Hello there my friend."])
+    tiny_captured = []
+    with pytest.raises(exam_gen.ExamAllRefusedError) as excinfo:
+        run(generate_paper(
+            tmp_db, as_material(tiny_words, tiny_ranges),
+            [{"type": "completion", "count": 3}],
+            {"api_key": "test"}, lang="zh",
+            chat_fn=fake_cached_chat([], capture=tiny_captured),
+        ))
+    assert excinfo.value.skipped[0]["reason"].startswith("[precheck]")
+    assert tiny_captured == []
+
+
+def test_precheck_map_without_spatial_language_skips(tmp_db):
+    """map_labelling over a transcript with no spatial sentences is
+    precheck-refused with zero LLM calls spent on the block."""
+    # 255 words (over map's 200 floor) but no spatial cue phrases.
+    words, ranges = make_material(SENTENCES * 3)
+    september = find_span(words, "September")
+    completion = {"groups": [{"items": [
+        {"stem": "The flat is available from the first of ______.",
+         "i0": september[0], "i1": september[1], "answer": "September",
+         "word_limit": "ONE WORD ONLY", "layout": "notes"},
+    ]}]}
+    captured = []
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 1}, {"type": "map_labelling", "count": 5}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([completion], capture=captured),
+    ))
+    assert len(result.skipped) == 1
+    skip = result.skipped[0]
+    assert skip["type"] == "map_labelling"
+    assert skip["reason"].startswith("[precheck]")
+    assert "空间" in skip["reason"]
+    assert [c["task"] for c in captured] == ["exam:completion"]
+
+
+def test_map_with_spatial_language_waits_for_scene_path(tmp_db):
+    """Spatial language present: the map block still cannot run until the
+    scene path lands (§4.3, later task) -- skipped by precheck, zero
+    LLM calls (the message changes when the two-step generation arrives)."""
+    words, ranges = make_material(MAP_TALK * 4)  # 228 words, spatial-rich
+    captured = []
+    with pytest.raises(exam_gen.ExamAllRefusedError) as excinfo:
+        run(generate_paper(
+            tmp_db, as_material(words, ranges),
+            [{"type": "map_labelling", "count": 5}],
+            {"api_key": "test"}, lang="zh",
+            chat_fn=fake_cached_chat([], capture=captured),
+        ))
+    skip = excinfo.value.skipped[0]
+    assert skip["type"] == "map_labelling"
+    assert skip["reason"].startswith("[precheck]")
+    assert "场景" in skip["reason"]
+    assert captured == []
+
+
+def test_shortfall_marks_group_partial_not_skipped(tmp_db):
+    """Insufficiency is not refusal (design §4.5): a block that ends under
+    quota after the retry path marks its group partial, never skipped."""
+    # 170 words: clears matching's 150-word floor.
+    words, ranges = make_material(LONG)
+    two_hundred_2 = find_span(words, "two hundred", 2)
+    passport_2 = find_span(words, "passport", 2)
+    response = {"groups": [{"title": "Facilities", "options": [
+        "Deposit", "Passport", "September", "Bus stop",
+    ], "items": [
+        {"stem": "Which amount is due?", "answer": "A",
+         "evidence": [{"i0": two_hundred_2[0], "i1": two_hundred_2[1]}]},
+        {"stem": "Which document?", "answer": "B",
+         "evidence": [{"i0": passport_2[0], "i1": passport_2[1]}]},
+    ]}]}
+
+    # 2 of 3 requested survive; the repair round returns the same two and
+    # the letter-dedup merge keeps the total at 2 -> partial, not skipped.
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "matching", "count": 3}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response, response]),
+    ))
+    group = result.paper["groups"][0]
+    assert len(group["items"]) == 2
+    assert group["partial"] is True
+    assert result.skipped == []
+
+    # A block that meets its quota carries partial: false.
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "matching", "count": 2}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response]),
+    ))
+    group = result.paper["groups"][0]
+    assert len(group["items"]) == 2
+    assert group["partial"] is False
+    assert result.skipped == []
+
+
 # ------------------------------------- restored validator defenses (pre-T9)
 
 
@@ -779,10 +1002,11 @@ def test_matching_two_blocks_share_one_pool(tmp_db):
     assert groups[1]["items"][0]["answer_text"] == "September"
 
 
-def test_visual_block_is_skipped_with_a_warning(tmp_db):
-    """map_labelling needs the scene path (design §4.3, later task): the
-    block is skipped with a warning, no LLM call is spent, and the
-    skipped list stays empty in Task 10."""
+def test_map_block_precheck_skips_into_skipped_list(tmp_db):
+    """A map block never spends an LLM call while the scene path is a
+    later task (design §4.3): the skip lands in skipped with the
+    [precheck] prefix (migrated out of paper.warnings, T10 review)."""
+    # 170 words: under map_labelling's 200-word floor.
     words, ranges = make_material(LONG)
     two_hundred = find_span(words, "two hundred")
     mcq = {
@@ -800,44 +1024,14 @@ def test_visual_block_is_skipped_with_a_warning(tmp_db):
         chat_fn=fake_cached_chat([{"groups": [{"items": [mcq]}]}],
                                  capture=captured),
     ))
-    assert any("地图" in w or "场景" in w for w in result.paper["warnings"])
     assert result.paper["total_items"] == 1
     assert result.paper["groups"][0]["type"] == "mcq_single"
-    assert result.skipped == []
-    # No LLM call was spent on the visual block.
+    assert len(result.skipped) == 1
+    assert result.skipped[0]["type"] == "map_labelling"
+    assert result.skipped[0]["reason"].startswith("[precheck]")
+    assert "200" in result.skipped[0]["reason"]
+    # No LLM call was spent on the map block.
     assert [c["task"] for c in captured] == ["exam:mcq_single"]
-
-
-def test_word_floor_skips_blocks_below_minimum(tmp_db):
-    """The deterministic min_words precheck (design §4.5) skips types the
-    transcript cannot feed; when every block is floored the paper fails."""
-    # 85 words: completion (80) fits, mcq_single (120) does not.
-    words, ranges = make_material(SENTENCES)
-    september = find_span(words, "September")
-    completion = {"groups": [{"items": [
-        {"stem": "The flat is available from the first of ______.",
-         "i0": september[0], "i1": september[1], "answer": "September",
-         "word_limit": "ONE WORD ONLY", "layout": "notes"},
-    ]}]}
-    captured = []
-    result = run(generate_paper(
-        tmp_db, as_material(words, ranges),
-        [{"type": "completion", "count": 1}, {"type": "mcq_single", "count": 2}],
-        {"api_key": "test"}, lang="zh",
-        chat_fn=fake_cached_chat([completion], capture=captured),
-    ))
-    assert [g["type"] for g in result.paper["groups"]] == ["completion"]
-    assert any("单选题" in w and "词" in w for w in result.paper["warnings"])
-    assert [c["task"] for c in captured] == ["exam:completion"]
-
-    # A tiny transcript floors every requested type -> hard failure.
-    tiny_words, tiny_ranges = make_material(["Hello there my friend."])
-    with pytest.raises(exam_gen.ExamGenError, match="词"):
-        run(generate_paper(
-            tmp_db, as_material(tiny_words, tiny_ranges),
-            [{"type": "completion", "count": 3}],
-            {"api_key": "test"}, lang="zh",
-        ))
 
 
 def test_generate_paper_rejects_bad_blocks(tmp_db):

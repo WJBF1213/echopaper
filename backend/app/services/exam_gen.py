@@ -16,12 +16,21 @@ the loosest limit in the group with the official wording (§4.1).
 Design constraints kept from the existing pipeline:
   * pure stdlib + local services, no framework imports;
   * every LLM call is stateless and goes through
-    ``llm.cached_chat_json`` (task=``exam:<type>``); prompts come from
-    the Task 5 registry;
+    ``llm.cached_chat_json`` (task=``exam:<type>``); prompts come from the
+    Task 5 registry;
   * exam rubrics and greetings are removed before the LLM sees the text,
     and the first/last content sentence of the material is protected
     from being blanked -- the exact failure mode of the old span-only
     prompt.
+
+Suitability refusal (design §4.5, Task 11) is kept semantically separate
+from insufficiency: a block whose transcript does not suit the type is
+*skipped* (deterministic prechecks spend no LLM call; a top-level
+``{"refused": true, "reason": ...}`` block response aborts the block
+with no retry, repair or top-up), while a block that simply produced
+fewer items than requested walks the retry/top-up path and its group is
+marked ``partial``. Refusal never masquerades as shrinkage and vice
+versa.
 """
 from __future__ import annotations
 
@@ -116,6 +125,23 @@ def _counts_as_number(words_json: list[dict], i0: int, i1: int) -> bool:
 
 class ExamGenError(Exception):
     """Raised when a paper cannot be produced at all."""
+
+
+class ExamAllRefusedError(ExamGenError):
+    """Every requested block was refused (precheck or LLM, design §4.5).
+
+    Carries the ``skipped`` list ``[{type, reason}]`` so the API layer can
+    answer 400 with ``{"detail": {"skipped": [...]}}`` instead of a flat
+    message. Subclasses :class:`ExamGenError` so generic handlers keep
+    working.
+    """
+
+    def __init__(self, skipped: list[dict]):
+        self.skipped = skipped
+        reasons = "；".join(
+            f"{s.get('type')}：{s.get('reason')}" for s in skipped
+        )
+        super().__init__(f"所有题型块均被拒绝：{reasons}")
 
 
 # ------------------------------------------------------- per-type paper data
@@ -360,6 +386,10 @@ class ExamGroup:
     items: list[ExamItem] = field(default_factory=list)
     # Shared option pool for matching; empty for other types.
     options: list[str] = field(default_factory=list)
+    # True when the block produced fewer items than requested (design
+    # §4.5): insufficiency is not refusal -- the shortfall stays visible
+    # on the paper instead of shrinking silently or entering skipped.
+    partial: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -367,6 +397,7 @@ class ExamGroup:
             "title": self.title,
             "instruction": self.instruction,
             "options": self.options,
+            "partial": self.partial,
             "items": [i.to_dict() for i in self.items],
         }
 
@@ -395,11 +426,11 @@ class GenerateResult:
     """What one ``generate_paper`` call produced (design §5.2).
 
     ``paper`` is the printable paper dict (``ExamPaper.to_dict`` shape).
-    ``skipped`` lists refused blocks ``[{type, reason}]`` (design §4.5);
-    it stays empty until the refusal path lands (Task 11) but the API
-    contract already carries it. ``usage`` records every block-level
-    ``cached_chat_json`` call with its task label and cache-hit flag
-    (Task 7 accounting).
+    ``skipped`` lists refused blocks ``[{type, reason}]`` (design §4.5):
+    deterministic precheck refusals carry the ``[precheck]`` reason
+    prefix and spent no LLM call; LLM refusals quote the model's reason.
+    ``usage`` records every block-level ``cached_chat_json`` call with its
+    task label and cache-hit flag (Task 7 accounting).
     """
 
     paper: dict
@@ -456,6 +487,52 @@ def content_ranges(words_json: list[dict], sentences: list[list[int]]) -> list[t
             continue
         out.append((s, e))
     return out
+
+
+#: Spatial cue phrases for the map precheck (design §4.5): the positional
+#: language the map rules text names (in/on the left, next to, opposite,
+#: at the bottom, between) plus its obvious siblings. A transcript
+#: without any of these cannot feed a map task, so the block is refused
+#: before an LLM call is spent.
+_SPATIAL_RE = re.compile(
+    r"\b(?:on|in|at|to|from)\s+the\s+(?:left|right|top|bottom|side|end|corner)\b"
+    r"|\bnext\s+to\b|\bopposite\b|\bbetween\b|\bbehind\b"
+    r"|\bin\s+front\s+of\b|\bacross\s+from\b|\bstraight\s+ahead\b"
+    r"|\bturn\s+(?:left|right)\b|\bgo\s+past\b",
+    re.I,
+)
+
+
+def has_spatial_language(words_json: list[dict], sentences: list[list[int]]) -> bool:
+    """Whether any content sentence carries spatial language (map cue)."""
+    words = [str(w.get("w", "")) for w in words_json]
+    return any(
+        _SPATIAL_RE.search(_sentence_text(words, s, e))
+        for s, e in content_ranges(words_json, sentences)
+    )
+
+
+def _refusal_reason(obj: Any, lang: str) -> str | None:
+    """A block-level suitability refusal (design §4.5), or None.
+
+    Structural, not count-based: the top-level ``refused`` flag must be
+    truthy AND the response must carry no items payload -- a response
+    with a ``groups`` array is an items response and never counts as
+    refused, whatever else it says. Detected before item validation; a
+    refused block is skipped with no retry, repair round or top-up.
+    """
+    if not isinstance(obj, Mapping) or not obj.get("refused"):
+        return None
+    if isinstance(obj.get("groups"), list):
+        return None
+    reason = str(obj.get("reason") or "").strip()
+    if reason:
+        return reason
+    return (
+        "材料不适合该题型"
+        if lang == "zh"
+        else "the transcript does not suit this type"
+    )
 
 
 def _render_ranges(words_json: list[dict], ranges: list[tuple[int, int]]) -> str:
@@ -1168,7 +1245,7 @@ async def _generate_block(
     client=None,
     chat_fn=None,
     usage: list[dict] | None = None,
-) -> tuple[list[tuple[str, list[ExamItem], list[str]]], list[str]]:
+) -> tuple[list[tuple[str, list[ExamItem], list[str]]], list[str], str | None]:
     """Generate one request block (one type, N items) from an audio zone.
 
     ``zone`` is this block's slice of the audio (the blocks' user order is
@@ -1178,6 +1255,12 @@ async def _generate_block(
     pool. ``layout_hint`` forces every completion item's layout (§4.1);
     ``variation`` (regenerate) appends the cache-busting marker (§8.3).
     Every LLM call is task-labelled ``exam:<type>`` and lands in ``usage``.
+
+    Returns ``(blocks, warnings, refusal)``: ``refusal`` is the reason
+    string when the LLM refused the block as unsuitable (§4.5) -- then
+    ``blocks`` is empty (any earlier chunk's items are discarded: the
+    material does not suit the type), no retry, repair round or top-up
+    ran, and the caller skips the block into ``skipped``.
     """
     content = content_ranges(words_json, sentences)
     if not content:
@@ -1309,6 +1392,13 @@ async def _generate_block(
             warnings.append(f"{qtype.key} 第 {ci + 1} 段 LLM 调用失败：{exc}")
             continue
 
+        # Refusal is detected before item validation (a refused response
+        # carries no items) and aborts the whole block: no more chunks,
+        # no repair round, no top-up (design §4.5).
+        refusal = _refusal_reason(obj, lang)
+        if refusal is not None:
+            return [], [], refusal
+
         blocks = _validate_response(
             obj,
             words_json,
@@ -1363,6 +1453,15 @@ async def _generate_block(
         }
         try:
             obj = await call(retry_messages)
+        except LlmError:
+            pass
+        else:
+            # A refusal on the repair round aborts the block like any
+            # other refusal (§4.5): the model judged the material
+            # unsuitable after all.
+            refusal = _refusal_reason(obj, lang)
+            if refusal is not None:
+                return [], [], refusal
             accept(
                 _validate_response(
                     obj,
@@ -1376,8 +1475,6 @@ async def _generate_block(
                     layout_hint=layout_hint,
                 )
             )
-        except LlmError:
-            pass
 
     # Deterministic top-up: a paper must come back with the advertised count.
     total_valid = sum(len(items) for _t, items, _o in results)
@@ -1397,7 +1494,7 @@ async def _generate_block(
             results.append(("", filler, []))
             warnings.append(f"规则补题 {len(filler)} 道（LLM 未凑满）")
 
-    return _merge_span_groups(results, qtype), warnings
+    return _merge_span_groups(results, qtype), warnings, None
 
 
 def _stem_for(
@@ -1765,6 +1862,47 @@ def _parse_blocks(blocks) -> list[tuple[QuestionType, int]]:
     return specs
 
 
+def _precheck_skip_reason(
+    qtype: QuestionType,
+    words_json: list[dict],
+    sentences: list[list[int]],
+    lang: str,
+) -> str | None:
+    """Deterministic pre-LLM refusals (design §4.5), or None.
+
+    Each check spends zero LLM calls; the returned reason carries the
+    ``[precheck]`` prefix (texts from the prompts module) and lands in
+    ``GenerateResult.skipped``, never in ``paper.warnings``:
+      * the transcript is under the type's ``min_words`` floor;
+      * a visual (map) type has no spatial-language sentence to build on.
+    """
+    loc = "zh" if lang == "zh" else "en"
+    label = _type_name(qtype, lang)
+    tag = prompts.PRECHECK_TAG
+    if len(words_json) < qtype.min_words:
+        text = prompts.PRECHECK_REASON_TOO_SHORT[loc].format(
+            words=len(words_json), label=label, min_words=qtype.min_words
+        )
+        return f"{tag} {text}"
+    if qtype.generates_visual:
+        if not has_spatial_language(words_json, sentences):
+            text = prompts.PRECHECK_REASON_NO_SPATIAL[loc].format(label=label)
+            return f"{tag} {text}"
+        # Spatial language is there, but the scene path is not built yet
+        # (§4.3, later task): the block still cannot run. This branch is
+        # replaced by the two-step scene generation when it lands.
+        if lang == "zh":
+            return (
+                f"{tag} {label}需要场景还原"
+                f"（地图场景随后续任务开放），本次已跳过"
+            )
+        return (
+            f"{tag} {label} needs scene restoration "
+            "(map scenes arrive in a later task); skipped for now"
+        )
+    return None
+
+
 async def generate_paper(
     conn,
     material: Mapping,
@@ -1812,28 +1950,18 @@ async def generate_paper(
     skipped: list[dict] = []
     ctx = build_context(words_json, sentences)
 
-    # Deterministic prechecks (design §4.5), no LLM call spent:
-    #   * visual types wait for the scene path (§4.3, later task);
-    #   * a transcript under the type's min_words floor cannot feed it.
+    # Deterministic prechecks (design §4.5), no LLM call spent: a block
+    # under its type's min_words floor, or a map block without spatial
+    # language, is refused into ``skipped`` before the generation loop.
     active: list[tuple[QuestionType, int]] = []
     for qtype, count in specs:
-        if qtype.generates_visual:
-            paper.warnings.append(
-                f"{_type_name(qtype, lang)}需要场景还原"
-                f"（地图场景随后续任务开放），本次已跳过"
-            )
-            continue
-        if len(words_json) < qtype.min_words:
-            paper.warnings.append(
-                f"{_type_name(qtype, lang)}需要至少 {qtype.min_words} 词的转写"
-                f"（当前 {len(words_json)} 词），本次已跳过"
-            )
+        reason = _precheck_skip_reason(qtype, words_json, sentences, lang)
+        if reason is not None:
+            skipped.append({"type": qtype.key, "reason": reason})
             continue
         active.append((qtype, count))
     if not active:
-        raise ExamGenError(
-            "没有可生成的题型块：" + "；".join(paper.warnings)
-        )
+        raise ExamAllRefusedError(skipped)
 
     content = content_ranges(words_json, sentences)
     if not content:
@@ -1861,7 +1989,7 @@ async def generate_paper(
             else None
         )
         try:
-            blocks_out, block_warnings = await _generate_block(
+            blocks_out, block_warnings, refusal = await _generate_block(
                 conn,
                 words_json,
                 sentences,
@@ -1882,6 +2010,11 @@ async def generate_paper(
         except ExamGenError as exc:
             paper.warnings.append(str(exc))
             continue
+        if refusal is not None:
+            # LLM suitability refusal (§4.5): skip the block, no retry
+            # happened, and nothing enters paper.warnings.
+            skipped.append({"type": qtype.key, "reason": refusal})
+            continue
         paper.warnings.extend(block_warnings)
 
         if qtype.answer_kind == "matching" and qtype.key not in shared_pool_by_type:
@@ -1890,18 +2023,27 @@ async def generate_paper(
                     shared_pool_by_type[qtype.key] = list(options)
                     break
 
+        produced = 0
+        block_groups: list[ExamGroup] = []
         for title, items, options in blocks_out:
             if not items:
                 continue
-            paper.groups.append(
-                ExamGroup(
-                    type_key=qtype.key,
-                    title=title or _type_name(qtype, lang),
-                    instruction=_group_instruction(qtype, items),
-                    items=items,
-                    options=_letter_pool(options) if options else [],
-                )
+            produced += len(items)
+            group = ExamGroup(
+                type_key=qtype.key,
+                title=title or _type_name(qtype, lang),
+                instruction=_group_instruction(qtype, items),
+                items=items,
+                options=_letter_pool(options) if options else [],
             )
+            block_groups.append(group)
+            paper.groups.append(group)
+        # Insufficiency is not refusal (§4.5): a block that ends under
+        # quota after the retry/top-up path marks its groups partial with
+        # the produced count instead of shrinking silently.
+        if block_groups and produced < count:
+            for group in block_groups:
+                group.partial = True
 
     # Number the whole paper in audio order. Blocks are zoned so their items
     # follow the block order, but if a block's items are heard earlier they
@@ -1917,6 +2059,12 @@ async def generate_paper(
         number += 1
 
     if paper.total_items == 0:
+        # Every requested block refused -> the all-refused signal (the
+        # API layer answers 400 with the skipped body, design §4.5). A
+        # block that failed on insufficiency instead keeps the generic
+        # error: that is not a refusal.
+        if len(skipped) == len(specs):
+            raise ExamAllRefusedError(skipped)
         raise ExamGenError(
             "没有生成任何可用题目；请检查转写内容或 LLM 返回"
         )

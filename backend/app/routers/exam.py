@@ -8,6 +8,11 @@ completion ``layout_hint`` and a ``regenerate`` cache-busting marker
 (design §4.4, §8.3). Nothing is persisted yet: the response carries
 ``{paper, skipped}`` and ``paper_id`` arrives with persistence (§5.1,
 later task).
+
+Suitability refusals (design §4.5): a partial refusal returns 200 with
+``skipped: [{type, reason}]`` listing each refused block; when every
+requested block is refused the endpoint answers 400 with
+``{"detail": {"skipped": [...]}}`` so the caller sees each reason.
 """
 from __future__ import annotations
 
@@ -75,6 +80,13 @@ async def generate_exam(
             layout_hint=body.layout_hint,
             regenerate=body.regenerate,
         )
+    except exam_gen.ExamAllRefusedError as exc:
+        # Every block refused (§4.5): 400 with the structured skipped
+        # body instead of a flat message. Must precede the generic
+        # ExamGenError handler (it subclasses it).
+        raise HTTPException(
+            status_code=400, detail={"skipped": exc.skipped}
+        ) from exc
     except exam_gen.ExamGenError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LlmError as exc:

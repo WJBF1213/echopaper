@@ -48,12 +48,13 @@ _SEED_TEXTS = [
 ] * 2
 
 
-def _seed(conn) -> str:
+def _seed(conn, texts=_SEED_TEXTS) -> str:
+    """Insert a material built from ``texts``; returns its id."""
     from app.services.jobs import _uid, _now
 
     words = []
     sentences = []
-    for text in _SEED_TEXTS:
+    for text in texts:
         start = len(words)
         for token in text.split():
             words.append(
@@ -65,7 +66,7 @@ def _seed(conn) -> str:
     conn.execute(
         "INSERT INTO materials(id,name,source_type,transcript,transcript_source,"
         "words_json,sentences_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-        (mid, "Exam mat", "upload", "\n".join(_SEED_TEXTS), "asr",
+        (mid, "Exam mat", "upload", "\n".join(texts), "asr",
          json.dumps(words), json.dumps(sentences), _now(), _now()),
     )
     conn.commit()
@@ -259,3 +260,151 @@ def test_exam_generates_paper_with_stub_llm(client, tmp_db, monkeypatch):
         "Complete the notes below."
     )
     _ = exam_gen
+
+
+# ------------------------------- suitability refusal (design §4.5)
+
+
+def test_exam_all_refused_by_precheck_returns_400(client, tmp_db, monkeypatch):
+    """Every block refused -> 400 with body {"detail": {"skipped": [...]}}
+    listing each refused type with its reason; no LLM call is spent."""
+    mid = _seed(tmp_db)  # 104 words: under mcq_single's 120-word floor
+    monkeypatch.setattr(
+        "app.routers.exam.llm_cfg_or_none", lambda _s: {"api_key": "test"}
+    )
+    res = client.post(
+        f"/api/materials/{mid}/exam",
+        json={"blocks": [{"type": "mcq_single", "count": 2}]},
+    )
+    assert res.status_code == 400
+    detail = res.json()["detail"]
+    assert set(detail) == {"skipped"}
+    assert len(detail["skipped"]) == 1
+    assert detail["skipped"][0]["type"] == "mcq_single"
+    assert detail["skipped"][0]["reason"].startswith("[precheck]")
+
+
+def test_exam_all_refused_by_llm_returns_400(client, tmp_db, monkeypatch):
+    """A refused LLM response for the only block is also an all-refused
+    request: 400 with the skipped body (one LLM call, no retry)."""
+    mid = _seed(tmp_db)
+    monkeypatch.setattr(
+        "app.routers.exam.llm_cfg_or_none", lambda _s: {"api_key": "test"}
+    )
+
+    async def refuse(conn, cfg, messages, *, task, **kwargs):
+        return (
+            {"refused": True, "reason": "转写没有足够的事实支撑出题"},
+            ChatUsage(prompt_tokens=10, completion_tokens=5, cached_tokens=0),
+            False,
+        )
+
+    monkeypatch.setattr(
+        "app.services.exam_gen.llm.cached_chat_json", refuse, raising=False
+    )
+    res = client.post(
+        f"/api/materials/{mid}/exam",
+        json={"blocks": [{"type": "completion", "count": 1}]},
+    )
+    assert res.status_code == 400
+    detail = res.json()["detail"]
+    assert detail["skipped"] == [
+        {"type": "completion", "reason": "转写没有足够的事实支撑出题"}
+    ]
+
+
+def test_exam_mixed_refusal_returns_200_with_skipped(client, tmp_db, monkeypatch):
+    """Partial refusal -> 200: the paper keeps the successful group and
+    the response lists the refused type with its reason."""
+    mid = _seed(tmp_db)
+    row = tmp_db.execute(
+        "SELECT words_json, sentences_json FROM materials WHERE id=?", (mid,)
+    ).fetchone()
+    words = json.loads(row["words_json"])
+    sentences = json.loads(row["sentences_json"])
+    monkeypatch.setattr(
+        "app.routers.exam.llm_cfg_or_none", lambda _s: {"api_key": "test"}
+    )
+
+    async def fake_cached(conn, cfg, messages, *, task, **kwargs):
+        assert task == "exam:completion"
+        return (
+            {"groups": [{"title": "Housing",
+                         "items": [_passport_item(words, sentences)]}]},
+            ChatUsage(prompt_tokens=10, completion_tokens=5, cached_tokens=0),
+            False,
+        )
+
+    monkeypatch.setattr(
+        "app.services.exam_gen.llm.cached_chat_json", fake_cached, raising=False
+    )
+    # completion succeeds; mcq_single is precheck-refused (104 < 120 words).
+    res = client.post(
+        f"/api/materials/{mid}/exam",
+        json={"blocks": [{"type": "completion", "count": 1},
+                         {"type": "mcq_single", "count": 2}]},
+    )
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert set(data) == {"paper", "skipped"}
+    assert data["paper"]["total_items"] == 1
+    assert [g["type"] for g in data["paper"]["groups"]] == ["completion"]
+    assert len(data["skipped"]) == 1
+    assert data["skipped"][0]["type"] == "mcq_single"
+    assert data["skipped"][0]["reason"].startswith("[precheck]")
+
+
+def test_exam_shortfall_group_partial_flag(client, tmp_db, monkeypatch):
+    """Insufficiency is not refusal: an under-quota block returns 200 with
+    its group marked partial and an empty skipped list."""
+    # 156 words: clears matching's 150-word floor.
+    mid = _seed(tmp_db, _SEED_TEXTS * 3)
+    row = tmp_db.execute(
+        "SELECT words_json, sentences_json FROM materials WHERE id=?", (mid,)
+    ).fetchone()
+    words = json.loads(row["words_json"])
+    monkeypatch.setattr(
+        "app.routers.exam.llm_cfg_or_none", lambda _s: {"api_key": "test"}
+    )
+
+    def _span(text):
+        target = text.lower().split()
+        tokens = [w["w"].lower() for w in words]
+        for i in range(len(tokens) - len(target) + 1):
+            if tokens[i: i + len(target)] == target:
+                return i, i + len(target) - 1
+        raise AssertionError(f"span not found: {text}")
+
+    two_hundred = _span("two hundred")
+    passport = _span("passport")
+    response = {"groups": [{"title": "Housing", "options": [
+        "Deposit amount", "ID document", "Start month", "Bus route",
+    ], "items": [
+        {"stem": "How much is due?", "answer": "A",
+         "evidence": [{"i0": two_hundred[0], "i1": two_hundred[1]}]},
+        {"stem": "What must you hand over?", "answer": "B",
+         "evidence": [{"i0": passport[0], "i1": passport[1]}]},
+    ]}]}
+
+    async def fake_cached(conn, cfg, messages, *, task, **kwargs):
+        assert task == "exam:matching"
+        return (
+            response,
+            ChatUsage(prompt_tokens=10, completion_tokens=5, cached_tokens=0),
+            False,
+        )
+
+    monkeypatch.setattr(
+        "app.services.exam_gen.llm.cached_chat_json", fake_cached, raising=False
+    )
+    res = client.post(
+        f"/api/materials/{mid}/exam",
+        json={"blocks": [{"type": "matching", "count": 3}]},
+    )
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["skipped"] == []
+    group = data["paper"]["groups"][0]
+    assert group["type"] == "matching"
+    assert len(group["items"]) == 2
+    assert group["partial"] is True

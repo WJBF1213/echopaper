@@ -60,6 +60,28 @@ PROMPTS_VERSION: int = 2
 #: settings-table key holding the ``{prompt_key: override_text}`` JSON dict.
 OVERRIDE_SETTING_KEY = "prompt_overrides"
 
+# ------------------------------------------------- §4.5 precheck texts
+# User-facing skip reasons for the generator's deterministic prechecks
+# (design §4.5: code-level refusals that save an LLM call). They are NOT
+# LLM prompts -- never rendered into a message and not registry entries --
+# but they live here so every generation-facing text sits in one module.
+# The map *scene* texts are deliberately absent: they arrive with the
+# scene task (design §4.3).
+
+#: Prefix marking a reason as a code-level precheck (zero LLM calls).
+PRECHECK_TAG = "[precheck]"
+
+PRECHECK_REASON_TOO_SHORT = {
+    "zh": "转写仅 {words} 词，{label}至少需要 {min_words} 词的转写",
+    "en": "transcript has only {words} words; {label} needs at least "
+          "{min_words}",
+}
+
+PRECHECK_REASON_NO_SPATIAL = {
+    "zh": "转写中没有空间方位描述，不适合{label}",
+    "en": "no spatial description in the transcript; unsuitable for {label}",
+}
+
 
 class PromptError(Exception):
     """Unknown prompt key, bad render variables, or a broken template."""
