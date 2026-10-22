@@ -1,0 +1,149 @@
+"""Task 6 API tests: GET/PUT /api/prompts (registry + overrides)."""
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import create_app
+from app.services import prompts
+
+
+class _FakeEngineManager:
+    def configure(self, **kw):
+        pass
+
+    async def switch(self, name):
+        return {"ok": True}
+
+    async def load(self):
+        return {"ok": True}
+
+    async def unload(self):
+        return {"unloaded": True}
+
+    def status(self):
+        return {"engine": "faster_whisper", "detail": None}
+
+
+class _FakeJobs:
+    def configure(self, **kw):
+        pass
+
+
+@pytest.fixture
+def client(tmp_db, tmp_path):
+    app = create_app(
+        conn=tmp_db,
+        data_dir=tmp_path,
+        dist_dir=tmp_path / "missing_dist",
+        engine_manager=_FakeEngineManager(),
+        jobs_manager=_FakeJobs(),
+    )
+    return TestClient(app)
+
+
+def test_list_prompts(client):
+    resp = client.get("/api/prompts")
+    assert resp.status_code == 200
+    entries = resp.json()
+    assert len(entries) == len(prompts.ALL_PROMPTS) == 32
+
+    fields = {"key", "title", "category", "variables", "default", "current",
+              "customized"}
+    for entry in entries:
+        assert fields <= set(entry)
+
+    by_key = {e["key"]: e for e in entries}
+    assert by_key["exam.system.zh"]["customized"] is False
+    assert by_key["exam.system.zh"]["current"] == by_key["exam.system.zh"]["default"]
+    assert by_key["exam.task_frame.zh"]["variables"] == [
+        "part", "label", "count", "instruction", "rules", "gap", "schema"]
+
+    # title follows Accept-Language (default zh without the header).
+    assert by_key["exam.system.zh"]["title"] == "系统提示 · 中文"
+    en = {
+        e["key"]: e
+        for e in client.get(
+            "/api/prompts", headers={"Accept-Language": "en-US,en;q=0.9"}
+        ).json()
+    }
+    assert en["exam.system.zh"]["title"] == "System prompt · Chinese"
+    assert en["exam.rules.form_completion.en"]["title"] == (
+        "Rules · Form completion")
+
+
+def test_put_override_and_reset(client):
+    key = "exam.system.zh"
+    default = prompts.get_prompt(
+        client.app.state.conn, key
+    )
+
+    # 1. PUT a custom text -> customized, current updated, default intact.
+    resp = client.put("/api/prompts", json={"key": key, "text": "你是测试命题人。"})
+    assert resp.status_code == 200
+    assert resp.json()["customized"] is True
+    assert resp.json()["current"] == "你是测试命题人。"
+
+    listed = {
+        e["key"]: e for e in client.get("/api/prompts").json()
+    }
+    assert listed[key]["customized"] is True
+    assert listed[key]["current"] == "你是测试命题人。"
+    assert listed[key]["default"] == default
+
+    # 2. PUT an empty string -> RESET to default.
+    resp = client.put("/api/prompts", json={"key": key, "text": ""})
+    assert resp.status_code == 200
+    assert resp.json()["customized"] is False
+    assert resp.json()["current"] == default
+
+    # 3. PUT null text also resets (same semantic as empty string).
+    client.put("/api/prompts", json={"key": key, "text": "再次自定义。"})
+    resp = client.put("/api/prompts", json={"key": key, "text": None})
+    assert resp.status_code == 200
+    assert resp.json()["customized"] is False
+    assert resp.json()["current"] == default
+
+
+def test_put_missing_placeholder_400(client):
+    key = "exam.stable_frame.zh"  # declares {{transcript}} + {{candidates}}
+
+    # Missing every placeholder -> 400 naming both.
+    resp = client.put(
+        "/api/prompts", json={"key": key, "text": "完全没有占位符的文本"}
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "{{transcript}}" in detail
+    assert "{{candidates}}" in detail
+
+    # Missing only one -> 400 naming just that one; nothing is saved.
+    resp = client.put(
+        "/api/prompts",
+        json={"key": key, "text": "转写：{{transcript}}（缺少候选）"},
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "{{candidates}}" in detail
+    assert "{{transcript}}" not in detail
+
+    listed = {
+        e["key"]: e for e in client.get("/api/prompts").json()
+    }
+    assert listed[key]["customized"] is False
+    assert listed[key]["current"] == listed[key]["default"]
+
+    # A text carrying every declared placeholder is accepted.
+    ok = client.put(
+        "/api/prompts",
+        json={"key": key, "text": "T: {{transcript}}\nC: {{candidates}}"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["customized"] is True
+
+
+def test_put_unknown_key_404(client):
+    resp = client.put(
+        "/api/prompts", json={"key": "exam.nope.zh", "text": "随便什么"}
+    )
+    assert resp.status_code == 404

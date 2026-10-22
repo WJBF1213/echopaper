@@ -81,3 +81,16 @@ class DictationIn(BaseModel):
 
 class TranslateIn(BaseModel):
     text: str
+
+
+class PromptPutIn(BaseModel):
+    """PUT /api/prompts body (Task 6).
+
+    ``text`` that is null/empty/whitespace RESETS the prompt to its default
+    — the opposite of the settings ``api_key`` convention (blank keeps the
+    stored value). Non-empty text must contain every ``{{placeholder}}`` the
+    registry spec declares; the router validates that.
+    """
+
+    key: str
+    text: Optional[str] = None

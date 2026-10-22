@@ -145,6 +145,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "translate.all_failed": "全部翻译渠道失败（gtx / MyMemory / LLM）",
         "translate.system": "你是英译中翻译引擎，只返回 JSON。",
         "translate.user": "将下面的英文句子翻译成简体中文：\n{text}",
+        # --- prompts registry (Task 6) -------------------------------------
+        "prompts.not_found": "提示词不存在：{name}",
+        "prompts.missing_placeholders": "提示词 {name} 缺少必需占位符：{missing}",
         # --- question generation -------------------------------------------
         "question_gen.empty": "材料为空或空数无效，无法生成题目",
         "question_gen.no_candidates": (
@@ -264,6 +267,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "translate.all_failed": "All translation channels failed (gtx / MyMemory / LLM)",
         "translate.system": "You are an English-to-Chinese translation engine. Return JSON only.",
         "translate.user": "Translate the following English sentence into Simplified Chinese:\n{text}",
+        # --- prompts registry (Task 6) -------------------------------------
+        "prompts.not_found": "Unknown prompt: {name}",
+        "prompts.missing_placeholders": (
+            "Prompt {name} is missing required placeholder(s): {missing}"
+        ),
         # --- question generation -------------------------------------------
         "question_gen.empty": "Empty material or invalid blank count; cannot generate questions",
         "question_gen.no_candidates": (

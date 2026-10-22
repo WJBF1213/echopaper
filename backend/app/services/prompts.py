@@ -429,7 +429,12 @@ def render_prompt(
 
 
 def list_prompts(conn: sqlite3.Connection) -> list[dict]:
-    """Catalogue every prompt: metadata plus default/current/customized."""
+    """Catalogue every prompt: metadata plus default/current/customized.
+
+    ``title`` picks by the key's own locale suffix; ``title_zh`` /
+    ``title_en`` carry both localized titles so the API layer can select
+    one via the request's Accept-Language (Task 6).
+    """
     overrides = _overrides(conn)
     entries: list[dict] = []
     for spec in ALL_PROMPTS:
@@ -440,6 +445,8 @@ def list_prompts(conn: sqlite3.Connection) -> list[dict]:
                 "key": spec.key,
                 "title": spec.title_zh if spec.key.endswith(".zh")
                 else spec.title_en,
+                "title_zh": spec.title_zh,
+                "title_en": spec.title_en,
                 "category": spec.category,
                 "variables": list(spec.variables),
                 "default": spec.default,
