@@ -23,26 +23,9 @@ MIN_GAP_WORDS = 5  # words required between two blanks
 MAX_SPAN_WORDS = 3  # IELTS: 1-3 words per answer
 MIN_CONFIDENCE = 0.6
 
-ITEMS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "i0": {"type": "integer"},
-                    "i1": {"type": "integer"},
-                    "answer": {"type": "string"},
-                    "type": {"type": "string"},
-                    "reason": {"type": "string"},
-                },
-                "required": ["i0", "i1"],
-            },
-        }
-    },
-    "required": ["items"],
-}
+# Structural validation lives in validate_items; the LLM core only parses
+# JSON, so the request keeps the legacy max_tokens budget (llm.MAX_TOKENS)
+# and sends the prompt as a [system, user] messages list.
 
 # Default-locale snapshot for callers that want the prompt text directly;
 # generate_set() re-resolves it per request via i18n.t().
@@ -429,9 +412,16 @@ async def generate_set(
             try:
                 obj = await chat(
                     llm_cfg,
-                    system_prompt,
-                    _user_prompt(words_json, a, b, candidates, quota),
-                    ITEMS_SCHEMA,
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": _user_prompt(
+                                words_json, a, b, candidates, quota
+                            ),
+                        },
+                    ],
+                    max_tokens=llm.MAX_TOKENS,
                 )
             except LlmError as exc:
                 rejected.append(i18n.t("question_gen.llm_failed", error=exc))
@@ -452,7 +442,14 @@ async def generate_set(
                 + "\n请避开这些问题重新选择。"
             )
             try:
-                obj = await chat(llm_cfg, system_prompt, retry_user, ITEMS_SCHEMA)
+                obj = await chat(
+                    llm_cfg,
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": retry_user},
+                    ],
+                    max_tokens=llm.MAX_TOKENS,
+                )
                 items, _rej2 = validate_items(
                     obj.get("items", []), words_json, sentences
                 )

@@ -102,6 +102,19 @@ CREATE TABLE IF NOT EXISTS jobs(
   updated_at TEXT NOT NULL
 );
 
+-- Local exact-match LLM response cache (design §8.3). user_version stays
+-- at 2: CREATE TABLE IF NOT EXISTS migrates existing databases on init.
+CREATE TABLE IF NOT EXISTS llm_cache(
+  cache_key TEXT PRIMARY KEY,   -- sha256(PROMPTS_VERSION|base_url|model|temperature|max_tokens|canonical_messages)
+  task TEXT NOT NULL,           -- 'exam:<type>' | 'scene' | 'translate' | ...
+  model TEXT NOT NULL,
+  response_json TEXT NOT NULL,  -- parsed response, canonical JSON
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  cached_tokens INTEGER,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_blanks_set ON blanks(set_id);
 CREATE INDEX IF NOT EXISTS idx_attempt_items_attempt ON attempt_items(attempt_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_material ON attempts(material_id);

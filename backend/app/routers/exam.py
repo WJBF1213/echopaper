@@ -99,6 +99,7 @@ async def generate_exam(
         raise HTTPException(status_code=400, detail=i18n.t("llm.no_key"))
     try:
         paper = await exam_gen.generate_paper(
+            conn,
             words,
             sentences,
             part=body.part,

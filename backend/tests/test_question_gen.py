@@ -42,12 +42,16 @@ class FakeChat:
         self.responses = list(responses)
         self.calls = []
 
-    async def __call__(self, cfg, system, user, schema, client=None):
-        self.calls.append({"system": system, "user": user, "schema": schema})
+    async def __call__(self, cfg, messages, **kwargs):
+        # Task 7 seam: messages list instead of (system, user, schema).
+        self.calls.append({"messages": messages})
         r = self.responses.pop(0)
         if isinstance(r, Exception):
             raise r
         return r
+
+    def user(self, i):
+        return self.calls[i]["messages"][-1]["content"]
 
 
 def test_llm_items_validated():
@@ -115,8 +119,8 @@ async def test_retry_once_with_rejection_reasons():
         chat_json_fn=chat,
     )
     assert len(chat.calls) == 2
-    assert "99" in chat.calls[1]["user"]  # rejection reason carried
-    assert "间距" in chat.calls[1]["user"] or "越界" in chat.calls[1]["user"]
+    assert "99" in chat.user(1)  # rejection reason carried
+    assert "间距" in chat.user(1) or "越界" in chat.user(1)
     assert len(result.blanks) == 2
     assert result.source == "llm"
 
@@ -385,10 +389,10 @@ async def test_chunking_on_small_budget():
     )
     assert len(chat.calls) == 2  # one per sentence chunk
     # chunk prompts are independent: each contains only its own range
-    assert "0:" in chat.calls[0]["user"] and "12:" not in chat.calls[0]["user"]
-    assert "12:" in chat.calls[1]["user"] and "11:" not in chat.calls[1]["user"]
+    assert "0:" in chat.user(0) and "12:" not in chat.user(0)
+    assert "12:" in chat.user(1) and "11:" not in chat.user(1)
     # no cross-call history: second prompt is not a continuation
-    assert chat.calls[1]["user"].split("文本")[0] == chat.calls[0]["user"].split("文本")[0]
+    assert chat.user(1).split("文本")[0] == chat.user(0).split("文本")[0]
     # merged result enforces global constraints
     starts = sorted(b.word_start for b in result.blanks)
     assert starts == [3, 15]

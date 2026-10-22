@@ -18,12 +18,6 @@ GTX_URL = "https://translate.googleapis.com/translate_a/single"
 MYMEMORY_URL = "https://api.mymemory.translated.net/get"
 GTX_TIMEOUT_S = 6.0
 
-TRANSLATION_SCHEMA = {
-    "type": "object",
-    "properties": {"translation": {"type": "string"}},
-    "required": ["translation"],
-}
-
 
 class TranslateError(Exception):
     """All translation channels failed."""
@@ -123,9 +117,13 @@ async def translate(
             try:
                 obj = await llm.chat_json(
                     llm_cfg,
-                    i18n.t("translate.system"),
-                    i18n.t("translate.user", text=text),
-                    TRANSLATION_SCHEMA,
+                    [
+                        {"role": "system", "content": i18n.t("translate.system")},
+                        {
+                            "role": "user",
+                            "content": i18n.t("translate.user", text=text),
+                        },
+                    ],
                 )
                 dst = (obj.get("translation") or "").strip()
                 if dst:

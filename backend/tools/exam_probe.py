@@ -92,15 +92,22 @@ async def main() -> None:
     )
     print(f"preset: {preset}  model: {cfg['model']}")
 
-    paper = await exam_gen.generate_paper(
-        words,
-        sentences,
-        part=args.part,
-        preset=preset,
-        llm_cfg=cfg,
-        material_id=args.material_id,
-        lang=args.lang,
-    )
+    # conn feeds the prompt registry (render_prompt + overrides).
+    conn = sqlite3.connect(ROOT / "data" / "app.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        paper = await exam_gen.generate_paper(
+            conn,
+            words,
+            sentences,
+            part=args.part,
+            preset=preset,
+            llm_cfg=cfg,
+            material_id=args.material_id,
+            lang=args.lang,
+        )
+    finally:
+        conn.close()
     data = paper.to_dict()
     print(json.dumps(data, ensure_ascii=False, indent=2))
     print(f"\ntotal items: {paper.total_items}")

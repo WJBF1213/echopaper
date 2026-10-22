@@ -120,7 +120,7 @@ def test_exam_generates_paper_with_stub_llm(client, tmp_db, monkeypatch):
     from app.services import jobs as jobs_svc
     from app.services.llm import LlmError
 
-    async def fake_chat(cfg, system, user, schema):
+    async def fake_chat(cfg, messages, **kwargs):
         # One valid item from the first content sentence.
         return {
             "groups": [

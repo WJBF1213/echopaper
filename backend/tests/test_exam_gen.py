@@ -54,9 +54,13 @@ def sentence_text(words: list[dict], s: int, e: int) -> str:
 
 
 def fake_chat(responses):
-    """Return an async chat stub cycling through ``responses``."""
+    """Return an async chat stub cycling through ``responses``.
 
-    async def _chat(cfg, system, user, schema):
+    Task 7 seam: the injected callable receives the caller-supplied
+    ``messages`` list (three-part layout), not (system, user, schema).
+    """
+
+    async def _chat(cfg, messages, **kwargs):
         return responses.pop(0)
 
     return _chat
@@ -119,7 +123,7 @@ def test_real_test_intro_is_excluded_but_content_survives():
     assert all("10 minutes" not in t for t in texts)
 
 
-def test_completion_validation_blocks_edges_rubrics_and_paraphrases():
+def test_completion_validation_blocks_edges_rubrics_and_paraphrases(tmp_db):
     words, ranges = make_material(SENTENCES)
     dep = find_span(words, "deposit")
     two = find_span(words, "two hundred")
@@ -159,6 +163,7 @@ def test_completion_validation_blocks_edges_rubrics_and_paraphrases():
     try:
         paper = run(
             generate_paper(
+                tmp_db,
                 words,
                 ranges,
                 part=1,
@@ -177,7 +182,7 @@ def test_completion_validation_blocks_edges_rubrics_and_paraphrases():
     assert any("保护" in w or "指令" in w or "句首" in w for w in paper.warnings)
 
 
-def test_completion_rejects_missing_blank_and_leaked_answer():
+def test_completion_rejects_missing_blank_and_leaked_answer(tmp_db):
     words, ranges = make_material(SENTENCES)
     two = find_span(words, "two hundred")
     response = {
@@ -199,7 +204,7 @@ def test_completion_rejects_missing_blank_and_leaked_answer():
     try:
         paper = run(
             generate_paper(
-                words, ranges, part=1, preset="test_one",
+                tmp_db, words, ranges, part=1, preset="test_one",
                 llm_cfg={"api_key": "test"}, chat_json_fn=fake_chat([response]),
             )
         )
@@ -211,7 +216,7 @@ def test_completion_rejects_missing_blank_and_leaked_answer():
     assert items[0].answer == "two hundred"
 
 
-def test_mcq_answer_is_normalized_to_letter_and_bad_options_rejected():
+def test_mcq_answer_is_normalized_to_letter_and_bad_options_rejected(tmp_db):
     words, ranges = make_material(SENTENCES)
     two = find_span(words, "two hundred")
     s2 = ranges[2]
@@ -236,7 +241,7 @@ def test_mcq_answer_is_normalized_to_letter_and_bad_options_rejected():
     try:
         paper = run(
             generate_paper(
-                words, ranges, part=2, preset="test_mcq",
+                tmp_db, words, ranges, part=2, preset="test_mcq",
                 llm_cfg={"api_key": "test"},
                 chat_json_fn=fake_chat([{"groups": [{"items": [good, bad]}]}]),
             )
@@ -249,7 +254,7 @@ def test_mcq_answer_is_normalized_to_letter_and_bad_options_rejected():
     assert items[0].options[1] == "Two hundred pounds"
 
 
-def test_matching_requires_unique_options_and_evidence():
+def test_matching_requires_unique_options_and_evidence(tmp_db):
     words, ranges = make_material(SENTENCES)
     s2 = ranges[2]
     quote = " ".join(w["w"] for w in words[s2[0] : s2[1] + 1])
@@ -275,7 +280,7 @@ def test_matching_requires_unique_options_and_evidence():
     try:
         paper = run(
             generate_paper(
-                words, ranges, part=2, preset="test_matching",
+                tmp_db, words, ranges, part=2, preset="test_matching",
                 llm_cfg={"api_key": "test"}, chat_json_fn=fake_chat([response]),
             )
         )
@@ -291,7 +296,7 @@ def test_matching_requires_unique_options_and_evidence():
     ]
 
 
-def test_visual_preset_is_skipped_with_a_warning():
+def test_visual_preset_is_skipped_with_a_warning(tmp_db):
     words, ranges = make_material(SENTENCES)
     s2 = ranges[2]
     mcq = {
@@ -302,7 +307,7 @@ def test_visual_preset_is_skipped_with_a_warning():
     }
     paper = run(
         generate_paper(
-            words, ranges, part=2, preset="p2_map_mcq",
+            tmp_db, words, ranges, part=2, preset="p2_map_mcq",
             llm_cfg={"api_key": "test"},
             chat_json_fn=fake_chat([{"groups": [{"items": [mcq]}]}]),
         )
@@ -312,12 +317,12 @@ def test_visual_preset_is_skipped_with_a_warning():
     assert paper.groups[0].type_key == "mcq_single"
 
 
-def test_preset_part_mismatch_is_rejected():
+def test_preset_part_mismatch_is_rejected(tmp_db):
     words, ranges = make_material(SENTENCES)
     with pytest.raises(exam_gen.ExamGenError):
         run(
             generate_paper(
-                words, ranges, part=4, preset="p1_form",
+                tmp_db, words, ranges, part=4, preset="p1_form",
                 llm_cfg={"api_key": "test"},
             )
         )

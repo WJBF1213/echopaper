@@ -96,7 +96,7 @@ async def test_llm_fallback_used(tmp_db, monkeypatch):
     client = FakeClient([httpx.ConnectError("gtx down"),
                          httpx.ConnectError("mymemory down")])
 
-    async def fake_chat(cfg, system, user, schema, client=None):
+    async def fake_chat(cfg, messages, **kwargs):
         return {"translation": "LLM译文"}
 
     monkeypatch.setattr(llm_mod, "chat_json", fake_chat)

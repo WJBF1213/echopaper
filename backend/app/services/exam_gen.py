@@ -8,7 +8,8 @@ cite a word-index span, and the validator checks the quote verbatim.
 
 Design constraints kept from the existing pipeline:
   * pure stdlib + local services, no framework imports;
-  * every LLM call is stateless and schema-validated (``llm.chat_json``);
+  * every LLM call is stateless (``llm.chat_json`` with a caller-built
+    messages list; prompts come from the Task 5 registry);
   * exam rubrics and greetings are removed before the LLM sees the text,
     and the first/last content sentence of a part is protected from being
     blanked -- the exact failure mode of the old span-only prompt;
@@ -21,7 +22,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from app.services import llm, pos
+from app.services import llm, pos, prompts
 from app.services.exam_presets import (
     QUESTION_TYPES,
     GroupSpec,
@@ -363,142 +364,6 @@ def _covered(i: int, ranges: list[tuple[int, int]]) -> bool:
 # --------------------------------------------------------------- LLM schema
 
 
-def _span_schema() -> dict:
-    return {
-        "type": "object",
-        "properties": {
-            "groups": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "items": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "stem": {"type": "string"},
-                                    "label": {"type": "string"},
-                                    "i0": {"type": "integer"},
-                                    "i1": {"type": "integer"},
-                                    "answer": {"type": "string"},
-                                    "reason": {"type": "string"},
-                                },
-                                "required": ["stem", "i0", "i1", "answer"],
-                            },
-                        },
-                    },
-                    "required": ["items"],
-                },
-            }
-        },
-        "required": ["groups"],
-    }
-
-
-def _option_schema() -> dict:
-    return {
-        "type": "object",
-        "properties": {
-            "groups": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "items": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "stem": {"type": "string"},
-                                    "options": {
-                                        "type": "array",
-                                        "items": {"type": "string"},
-                                    },
-                                    "answer": {"type": "string"},
-                                    "evidence": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "i0": {"type": "integer"},
-                                                "i1": {"type": "integer"},
-                                                "quote": {"type": "string"},
-                                            },
-                                            "required": ["i0", "i1"],
-                                        },
-                                    },
-                                    "reason": {"type": "string"},
-                                },
-                                "required": ["stem", "options", "answer", "evidence"],
-                            },
-                        },
-                    },
-                    "required": ["items"],
-                },
-            }
-        },
-        "required": ["groups"],
-    }
-
-
-def _matching_schema() -> dict:
-    return {
-        "type": "object",
-        "properties": {
-            "groups": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "options": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "items": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "stem": {"type": "string"},
-                                    "answer": {"type": "string"},
-                                    "evidence": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "i0": {"type": "integer"},
-                                                "i1": {"type": "integer"},
-                                                "quote": {"type": "string"},
-                                            },
-                                            "required": ["i0", "i1"],
-                                        },
-                                    },
-                                    "reason": {"type": "string"},
-                                },
-                                "required": ["stem", "answer", "evidence"],
-                            },
-                        },
-                    },
-                    "required": ["options", "items"],
-                },
-            }
-        },
-        "required": ["groups"],
-    }
-
-
-def _schema_for(qtype: QuestionType) -> dict:
-    if qtype.answer_kind == "span":
-        return _span_schema()
-    if qtype.answer_kind == "matching":
-        return _matching_schema()
-    return _option_schema()
-
-
 def _schema_hint(qtype: QuestionType) -> str:
     if qtype.answer_kind == "span":
         return (
@@ -521,69 +386,10 @@ def _schema_hint(qtype: QuestionType) -> str:
 
 
 # ----------------------------------------------------------------- prompts
-
-_SYSTEM_ZH = """你是剑桥雅思听力命题人，负责按官方题型生成可直接用于练习的整套题目。
-硬性规则：
-1. 只能使用转写中明确出现的事实，不得编造人名、数字、地点、观点或因果关系。
-2. 所有 evidence 必须是转写中逐字连续的词跨度；i0/i1 必须在给定范围内，
-   quote 必须与这些词逐字一致（只允许大小写和标点差异）。
-3. 禁止使用考试指令、转场语、问候和告别句。输入已经剔除这些句子；
-   如果仍引用到，该题作废。
-4. 题目顺序必须与音频顺序一致，题与题之间至少间隔 5 个词。
-5. 不要集中挖开头或结尾：开头的寒暄/介绍和结尾的总结/道别都不是考点。
-6. 题干用英文，答案必须符合该题型的字数限制。
-7. 只返回 JSON 对象，不要解释性文字。"""
-
-_SYSTEM_EN = """You are a Cambridge IELTS Listening item writer. Generate a
-complete, practice-ready set of items for the requested question type.
-Hard rules:
-1. Use only facts explicitly present in the transcript; never invent names,
-   numbers, places, opinions or causal links.
-2. Every evidence entry must be a verbatim word span. i0/i1 must be inside
-   the supplied ranges, and quote must match those words exactly (case and
-   punctuation differences are tolerated).
-3. Never use exam rubrics, part transitions, greetings or sign-offs. They
-   have been removed from the input; any item citing one is invalid.
-4. Items must follow audio order, with at least 5 words between two answers.
-5. Do not cluster items at the very start or the very end. Opening small
-   talk and closing summaries are not test points.
-6. Write stems in English and respect the word limit of the type.
-7. Return a JSON object only; no prose."""
-
-_USER_ZH = """Part {part} · {label}
-题型：{label}
-组内题量：{count}
-试卷指令（英文）：{instruction}
-
-可用于命题的转写内容（每行一句，词前的数字是全局词索引）：
-{transcript}
-
-候选答案（词性/置信度预筛，仅供参考，也可选候选之外的跨度）：
-{candidates}
-
-题型要求：
-{rules}
-
-请按音频顺序出题，至少间隔 {gap} 个词；不要把题目集中在开头或结尾。
-返回 JSON：{schema_hint}"""
-
-_USER_EN = """Part {part} · {label}
-Question type: {label}
-Items requested: {count}
-Paper instruction: {instruction}
-
-Transcript usable for items (one sentence per line; numbers are global word indices):
-{transcript}
-
-Pre-filtered candidate answers (optional hints; other spans are allowed):
-{candidates}
-
-Type requirements:
-{rules}
-
-Follow audio order with at least {gap} words between answers; do not cluster
-items at the very start or end.
-Return JSON: {schema_hint}"""
+# All prompt texts live in the Task 5 registry (app/services/prompts.py);
+# _build_messages assembles the three-part layout of design §8.1 with the
+# prefix ordered by stability: system (global) -> stable frame (per
+# material: transcript + candidates) -> task frame (per request).
 
 
 # -------------------------------------------------------------- validation
@@ -1063,7 +869,8 @@ def _allocate(total: int, sizes: list[int]) -> list[int]:
     return base
 
 
-def _build_user_prompt(
+def _build_messages(
+    conn,
     words_json: list[dict],
     sentences: list[list[int]],
     *,
@@ -1074,9 +881,16 @@ def _build_user_prompt(
     count: int,
     lang: str,
     shared_options: list[str] | None = None,
-) -> str:
+) -> list[dict]:
+    """Three-part message list (design §8.1), ordered by prefix stability.
+
+    system (globally stable) -> stable frame (per material: transcript +
+    candidates, byte-identical across requests over the same material) ->
+    task frame (per request: type rules, count, JSON schema hint). The
+    texts are the Task 5 registry's verbatim migration of the legacy
+    single user message; only the position of the segments changed.
+    """
     label = localized(qtype.label, lang)
-    template = _USER_ZH if lang == "zh" else _USER_EN
     candidates = (
         _candidate_hint(words_json, sentences, allowed, count)
         if qtype.answer_kind == "span"
@@ -1097,28 +911,46 @@ def _build_user_prompt(
                 "\nUse exactly this option list (do not add, drop or reword "
                 "options); answer must be one of its letters:\n" + listed
             )
-    return template.format(
-        part=part,
-        label=label,
-        count=count,
-        instruction=qtype.instruction,
-        transcript=_render_ranges(words_json, ranges),
-        candidates=candidates,
-        rules=rules,
-        gap=MIN_GAP_WORDS,
-        schema_hint=_schema_hint(qtype),
-    )
+    return [
+        {
+            "role": "system",
+            "content": prompts.render_prompt(conn, "exam.system", lang),
+        },
+        {
+            "role": "user",
+            "content": prompts.render_prompt(
+                conn,
+                "exam.stable_frame",
+                lang,
+                transcript=_render_ranges(words_json, ranges),
+                candidates=candidates,
+            ),
+        },
+        {
+            "role": "user",
+            "content": prompts.render_prompt(
+                conn,
+                "exam.task_frame",
+                lang,
+                part=part,
+                label=label,
+                count=count,
+                instruction=qtype.instruction,
+                rules=rules,
+                gap=MIN_GAP_WORDS,
+                schema=_schema_hint(qtype),
+            ),
+        },
+    ]
 
 
 async def _call_group(
     chat,
     llm_cfg: Any,
-    system_prompt: str,
-    user_prompt: str,
-    schema: dict,
+    messages: list[dict],
 ) -> dict:
     try:
-        return await chat(llm_cfg, system_prompt, user_prompt, schema)
+        return await chat(llm_cfg, messages)
     except LlmError:
         raise
     except Exception as exc:  # network layer from an injected fake
@@ -1126,6 +958,7 @@ async def _call_group(
 
 
 async def _generate_block(
+    conn,
     words_json: list[dict],
     sentences: list[list[int]],
     *,
@@ -1167,8 +1000,6 @@ async def _generate_block(
         allowed = whole_allowed
 
     chat = chat_json_fn or llm.chat_json
-    system_prompt = _SYSTEM_ZH if lang == "zh" else _SYSTEM_EN
-    schema = _schema_for(qtype)
 
     chunks = _pack_ranges(content)
     # Spread a single-pass completion block across the audio instead of letting
@@ -1242,7 +1073,8 @@ async def _generate_block(
         ]
         if not chunk_allowed:
             chunk_allowed = chunk
-        user_prompt = _build_user_prompt(
+        user_messages = _build_messages(
+            conn,
             words_json,
             sentences,
             part=part,
@@ -1254,7 +1086,7 @@ async def _generate_block(
             shared_options=local_pool,
         )
         try:
-            obj = await _call_group(chat, llm_cfg, system_prompt, user_prompt, schema)
+            obj = await _call_group(chat, llm_cfg, user_messages)
         except LlmError as exc:
             warnings.append(f"{qtype.key} 第 {ci + 1} 段 LLM 调用失败：{exc}")
             continue
@@ -1283,17 +1115,22 @@ async def _generate_block(
     if total_valid < spec.count:
         missing = spec.count - total_valid
         rejected = [w for w in warnings if w.startswith("拒绝")]
-        retry_prompt = (
-            _build_user_prompt(
-                words_json,
-                sentences,
-                part=part,
-                qtype=qtype,
-                ranges=content,
-                allowed=allowed,
-                count=missing,
-                lang=lang,
-            )
+        # The repair suffix rides on the tail of the task frame (the least
+        # stable message), leaving the system + stable-frame prefix intact.
+        retry_messages = _build_messages(
+            conn,
+            words_json,
+            sentences,
+            part=part,
+            qtype=qtype,
+            ranges=content,
+            allowed=allowed,
+            count=missing,
+            lang=lang,
+        )
+        retry_messages[-1] = {
+            **retry_messages[-1],
+            "content": retry_messages[-1]["content"]
             + (
                 "\n\n上一轮以下题目未通过校验：\n"
                 + "\n".join(f"- {r}" for r in rejected[:12])
@@ -1302,12 +1139,10 @@ async def _generate_block(
                 else "\n\n上一轮题量不足。\n"
             )
             + f"请再生成 {missing} 道，避开上述问题；"
-            "不要重复上一轮已经通过的答案。"
-        )
+            "不要重复上一轮已经通过的答案。",
+        }
         try:
-            obj = await _call_group(
-                chat, llm_cfg, system_prompt, retry_prompt, schema
-            )
+            obj = await _call_group(chat, llm_cfg, retry_messages)
             accept(
                 _validate_response(
                     obj,
@@ -1636,6 +1471,7 @@ def _validate_response(
 
 
 async def generate_paper(
+    conn,
     words_json: list[dict],
     sentences: list[list[int]],
     *,
@@ -1646,7 +1482,11 @@ async def generate_paper(
     lang: str = "zh",
     chat_json_fn=None,
 ) -> ExamPaper:
-    """Generate a complete typed paper for one IELTS part."""
+    """Generate a complete typed paper for one IELTS part.
+
+    ``conn`` is the SQLite connection used to render prompts from the Task 5
+    registry (overrides included); ``lang`` is the prompt locale ("zh"/"en").
+    """
     if not words_json:
         raise ExamGenError("材料没有词表，无法出题")
     if llm_cfg is None:
@@ -1688,6 +1528,7 @@ async def generate_paper(
         shared = shared_pool_by_type.get(qtype.key) if qtype.answer_kind == "matching" else None
         try:
             blocks, warnings = await _generate_block(
+                conn,
                 words_json,
                 sentences,
                 part=int(part),
