@@ -1,11 +1,9 @@
 """Single source of truth for every LLM prompt (Task 5).
 
-All prompt texts for the exam pipeline live in ``ALL_PROMPTS``. The legacy
-copies in ``exam_gen._SYSTEM_ZH/_SYSTEM_EN/_USER_ZH/_USER_EN`` and in
-``exam_presets.rules_zh/rules_en`` are migrated here VERBATIM; the only
-edit is that ``str.format`` interpolation points (``{var}``) became literal
-``{{var}}`` placeholders. ``exam_gen`` keeps its own constants until it
-switches to this registry (Task 7); this module is the new source of truth.
+All prompt texts for the exam pipeline live in ``ALL_PROMPTS``. The
+frames were migrated verbatim from the legacy ``exam_gen`` constants; the
+per-type rules texts were rewritten by the Task 9 six-key swap (see the
+notes below). ``exam_gen`` consumes only this registry.
 
 Migration and split notes
 -------------------------
@@ -28,10 +26,17 @@ Migration and split notes
   two frames are assembled into one user message is decided by the
   generator (Task 7), not here.
 
-* ``exam.rules.<type>.<locale>`` <- ``exam_presets.rules_zh`` / ``rules_en``
-  of every question type registered today (13 types). Completion rules
-  keep their ``{{max_words}}`` placeholder; ``word_limit`` never occurred
-  in the legacy texts, so it is not declared as a variable.
+* ``exam.rules.<type>.<locale>`` <- the per-type requirements texts. The
+  Task 9 six-key swap replaced the 13 legacy entries with one pair per
+  registered type (mcq_single / mcq_multi / matching / completion /
+  short_answer / map_labelling). The new texts adapt the legacy rules,
+  add per-item ``word_limit`` and layout-suggestion guidance for
+  ``completion``, and every one ends with the refusal-guidance paragraph
+  of design §4.5 (return ``refused`` with a one-line reason instead of
+  forcing items the transcript cannot support). The texts declare no
+  ``{{variables}}`` — completion's word limit is per-item guidance now,
+  not a template slot. ``PROMPTS_VERSION`` moved 1 -> 2, which changes
+  every LLM cache key (intended).
 
 Rendering performs LITERAL ``str.replace`` per variable — never
 ``str.format`` or f-strings — because templates and variable values are
@@ -40,7 +45,7 @@ full of JSON braces that would crash format-based interpolation.
 Overrides persist through the existing settings table (``app.db``) under
 the key ``prompt_overrides`` as a JSON dict ``{prompt_key: text}``.
 
-Self-contained: stdlib + ``app.db`` helpers only.
+Self-contained: stdlib + ``app.db`` helpers + the type registry's names.
 """
 from __future__ import annotations
 
@@ -48,8 +53,9 @@ import sqlite3
 from dataclasses import dataclass
 
 from app import db
+from app.services.exam_presets import QUESTION_TYPES
 
-PROMPTS_VERSION: int = 1
+PROMPTS_VERSION: int = 2
 
 #: settings-table key holding the ``{prompt_key: override_text}`` JSON dict.
 OVERRIDE_SETTING_KEY = "prompt_overrides"
@@ -138,167 +144,142 @@ Follow audio order with at least {{gap}} words between answers; do not cluster
 items at the very start or end.
 Return JSON: {{schema}}"""
 
-_COMPLETION_RULES_ZH = (
-    "答案必须是给定转写中逐字连续的一段，且不超过 {{max_words}} 个词"
-    "（数字整体算一个词：250、two hundred and fifty 均算一个）。"
-    "不得改写、翻译或补全。"
-    "stem 用英文原句，把答案位置替换为 ______；form/note 可另给 label。"
-    "不要考句首两词、考试指令、问候与告别语。"
-)
-_COMPLETION_RULES_EN = (
-    "The answer must be a verbatim, contiguous span from the transcript of "
-    "at most {{max_words}} word(s), where a whole number counts as one word "
-    "(250 and 'two hundred and fifty' both count as one). Never paraphrase, "
-    "translate or complete it. Write the stem as the original English "
-    "sentence with the answer replaced by ______; form/note items may add a "
-    "label. Never test the first two words of a sentence, exam rubrics, "
-    "greetings or sign-offs."
-)
-
-#: (type key, label zh, label en, rules zh, rules en) — verbatim from
-#: ``exam_presets.QUESTION_TYPES`` in registration order.
-_RULES: tuple[tuple[str, str, str, str, str], ...] = (
-    (
-        "form_completion",
-        "表单填空",
-        "Form completion",
-        _COMPLETION_RULES_ZH + "表单题要给出字段标签 label（如 Name、Deposit）。",
-        _COMPLETION_RULES_EN
-        + " Form items must include a short field label (Name, Deposit, ...).",
-    ),
-    (
-        "note_completion",
-        "笔记填空",
-        "Note completion",
-        _COMPLETION_RULES_ZH + "按主题分组（每组 2-4 题），组标题用英文。",
-        _COMPLETION_RULES_EN
-        + " Group items by topic (2-4 per group) with an English group title.",
-    ),
-    (
-        "table_completion",
-        "表格填空",
-        "Table completion",
-        _COMPLETION_RULES_ZH + "每题的 label 写所在行/列的提示词。",
-        _COMPLETION_RULES_EN
-        + " Each item's label should name its row or column cue.",
-    ),
-    (
-        "sentence_completion",
-        "句子填空",
-        "Sentence completion",
-        _COMPLETION_RULES_ZH + "题干必须是原文中的完整句子。",
-        _COMPLETION_RULES_EN
-        + " The stem must be a complete sentence taken from the transcript.",
-    ),
-    (
-        "summary_completion",
-        "摘要填空",
-        "Summary completion",
-        _COMPLETION_RULES_ZH
-        + "摘要可用同义改写，但每个答案仍须是原文逐字跨度；不要连续挖相邻词。",
-        _COMPLETION_RULES_EN
-        + " The summary may paraphrase, but each answer stays verbatim and "
-        "two blanks must never be adjacent.",
-    ),
-    (
-        "flowchart_completion",
-        "流程图填空",
-        "Flow-chart completion",
-        _COMPLETION_RULES_ZH + "按流程顺序出题，每题 label 写流程步骤名。",
-        _COMPLETION_RULES_EN + " Follow the process order; each label names its step.",
-    ),
-    (
-        "short_answer",
-        "简答题",
-        "Short answer",
-        _COMPLETION_RULES_ZH
-        + "题干写成英文疑问句，答案必须是原文中能直接回答该问题的词跨度。",
-        _COMPLETION_RULES_EN
-        + " Write an English question; the answer span must directly answer it.",
-    ),
-    (
-        "mcq_single",
-        "单选题",
-        "Multiple choice (single answer)",
+#: type key -> (rules zh, rules en). Every text ends with its refusal
+#: paragraph (design §4.5); the parenthetical examples are adapted per
+#: type, the core sentence stays recognizable so overrides stay comparable.
+_RULES_TEXTS: dict[str, tuple[str, str]] = {
+    "mcq_single": (
         "每题 3 个选项、恰好 1 个正确。正确项必须由原文明确支持；"
         "干扰项必须与原文矛盾或原文未提及，不能同样成立。"
-        "evidence 引用支持正确答案的原文词跨度；题干用英文。",
-        "Exactly 3 options and 1 correct answer. The correct option must "
-        "be explicitly supported by the transcript; distractors must be "
-        "contradicted or unsupported, never also true. Cite the supporting "
-        "span as evidence. Write the stem in English.",
+        "evidence 引用支持正确答案的原文词跨度；题干用英文。\n"
+        "若转写内容不适合本题型（如缺少可构造独立干扰项的明确事实、"
+        "信息密度不足以出足量题目），不要硬凑——返回 refused 并给一句话原因。",
+        "Exactly 3 options and 1 correct answer per item. The correct "
+        "option must be explicitly supported by the transcript; "
+        "distractors must be contradicted or unsupported, never also "
+        "true. Cite the supporting span as evidence. Write the stem in "
+        "English.\n"
+        "If the transcript does not suit this type (no distinct facts to "
+        "build independent distractors, or too little material for the "
+        "requested item count), do not force it — return refused with a "
+        "one-line reason.",
     ),
-    (
-        "mcq_multi",
-        "多选题（选两项）",
-        "Multiple choice (two answers)",
+    "mcq_multi": (
         "每题 5 个选项、恰好 2 个正确。两个正确项都必须由原文支持；"
-        "干扰项不得成立。answer 写成 \"A,C\"；evidence 引用支持两个正确项的词跨度。",
-        "Exactly 5 options and 2 correct answers. Both must be supported "
-        "by the transcript; distractors must not be true. Return answer "
-        'as "A,C" and cite spans supporting both.',
+        "干扰项不得成立。answer 写成 \"A,C\"；"
+        "evidence 引用支持两个正确项的词跨度。\n"
+        "若转写内容不适合本题型（如缺少可并列支撑两个正确项的要点、"
+        "信息密度不足以出足量题目），不要硬凑——返回 refused 并给一句话原因。",
+        "Exactly 5 options and 2 correct answers per item. Both correct "
+        "options must be supported by the transcript; distractors must "
+        "not be true. Return the answer as \"A,C\" and cite spans "
+        "supporting both.\n"
+        "If the transcript does not suit this type (not enough parallel "
+        "points to support two correct answers, or too little material "
+        "for the requested item count), do not force it — return refused "
+        "with a one-line reason.",
     ),
-    (
-        "matching",
-        "匹配题",
-        "Matching",
+    "matching": (
         "先给出 4-6 个选项组成的选项池 options，再出 3-6 道匹配题。"
         "每个选项最多使用一次，答案必须由原文明确支持；"
-        "evidence 引用支持该匹配的词跨度。",
+        "evidence 引用支持该匹配的词跨度。\n"
+        "若转写内容不适合本题型（如缺少可匹配的选项特征、"
+        "选项之间区分度不足、信息密度不足以出足量题目），"
+        "不要硬凑——返回 refused 并给一句话原因。",
         "Provide a shared option list of 4-6 options, then 3-6 matching "
         "items. Each option is used at most once; every match must be "
-        "explicitly supported by the transcript.",
+        "explicitly supported by the transcript, with the supporting span "
+        "cited as evidence.\n"
+        "If the transcript does not suit this type (no matchable option "
+        "features, options without enough contrast, or too little "
+        "material for the requested item count), do not force it — "
+        "return refused with a one-line reason.",
     ),
-    (
-        "map_labelling",
-        "地图标注",
-        "Map labelling",
-        "地图题需要一张地图图像；纯音频无法生成，必须由用户提供底图。",
-        "Map labelling needs a map image; audio alone cannot generate it. "
-        "The user must supply the base map.",
+    "completion": (
+        "答案必须是给定转写中逐字连续的一段"
+        "（数字整体算一个词：250、two hundred and fifty 均算一个）。"
+        "不得改写、翻译或补全。stem 用英文原句，把答案位置替换为 ______。"
+        "按考点自行决定每题答案长度（1-3 词），并在 word_limit 写明"
+        "（如 ONE WORD ONLY / NO MORE THAN TWO WORDS AND/OR A NUMBER）。"
+        "根据内容为每组建议版式 layout：对话问答用 form；列举对比用 table；"
+        "讲座要点用 notes；单独完整句用 sentence；摘要改写用 summary；"
+        "流程顺序用 flowchart。不要考句首两词、考试指令、问候与告别语。\n"
+        "若转写内容不适合本题型（如缺少值得挖空的实词、"
+        "信息密度不足以出足量题目），不要硬凑——返回 refused 并给一句话原因。",
+        "The answer must be a verbatim, contiguous span from the "
+        "transcript (a whole number counts as one word: 250 and 'two "
+        "hundred and fifty' both count as one). Never paraphrase, "
+        "translate or complete it. Write the stem as the original "
+        "English sentence with the answer replaced by ______. Choose "
+        "each answer's length to fit its test point (1-3 words) and "
+        "state it in word_limit (e.g. ONE WORD ONLY / NO MORE THAN TWO "
+        "WORDS AND/OR A NUMBER). Suggest the layout that fits each "
+        "group's content: form for dialogue Q&A, table for lists and "
+        "contrasts, notes for lecture points, sentence for standalone "
+        "sentences, summary for paraphrased digests, flowchart for "
+        "processes. Never test the first two words of a sentence, exam "
+        "rubrics, greetings or sign-offs.\n"
+        "If the transcript does not suit this type (not enough content "
+        "words worth blanking, or too little material for the requested "
+        "item count), do not force it — return refused with a one-line "
+        "reason.",
     ),
-    (
-        "plan_labelling",
-        "平面图标注",
-        "Plan labelling",
-        "平面图题需要一张平面图；纯音频无法生成，必须由用户提供底图。",
-        "Plan labelling needs a plan image; audio alone cannot generate "
-        "it. The user must supply the base plan.",
+    "short_answer": (
+        "题干写成英文疑问句，答案必须是原文中能直接回答该问题的逐字词跨度"
+        "（不超过 3 个词，数字整体算一个词），不得改写或翻译。\n"
+        "若转写内容不适合本题型（如缺少能以疑问句直接指向的事实点、"
+        "信息密度不足以出足量题目），不要硬凑——返回 refused 并给一句话原因。",
+        "Write each stem as an English question; the answer must be a "
+        "verbatim span from the transcript (at most 3 words, a whole "
+        "number counts as one) that directly answers it. Never paraphrase "
+        "or translate.\n"
+        "If the transcript does not suit this type (no facts a question "
+        "can point at directly, or too little material for the requested "
+        "item count), do not force it — return refused with a one-line "
+        "reason.",
     ),
-    (
-        "diagram_labelling",
-        "示意图标注",
-        "Diagram labelling",
-        "示意图题需要一张示意图；纯音频无法生成，必须由用户提供底图。",
-        "Diagram labelling needs a diagram image; audio alone cannot "
-        "generate it. The user must supply the base diagram.",
+    "map_labelling": (
+        "地图题按说话人的空间描述出题：场景由节点和路径构成，"
+        "每个空位对应图上一个待标注的位置，answer 是选项字母；"
+        "evidence 引用支撑该位置的原文词跨度"
+        "（in/on the left、next to、opposite、at the bottom、between "
+        "等空间描述优先作为考点）。\n"
+        "若转写内容不适合本题型（如转写中没有空间语言、"
+        "说话人没有描述位置关系），不要硬凑——返回 refused 并给一句话原因。",
+        "Build map items from the speaker's spatial description: the "
+        "scene is nodes and paths, each blank is a point on the map to "
+        "be labelled, the answer is an option letter, and evidence "
+        "cites the span supporting that location (spatial phrases such "
+        "as in/on the left, next to, opposite, at the bottom, between "
+        "make the best test points).\n"
+        "If the transcript does not suit this type (no spatial "
+        "language, or the speaker never describes position relations), "
+        "do not force it — return refused with a one-line reason.",
     ),
-)
+}
+
+_missing_rules = set(QUESTION_TYPES) - set(_RULES_TEXTS)
+if _missing_rules:
+    raise RuntimeError(
+        f"prompt rules text missing for question types: {sorted(_missing_rules)}"
+    )
 
 
 def _rule_specs() -> tuple[PromptSpec, ...]:
     specs: list[PromptSpec] = []
-    for type_key, label_zh, label_en, rules_zh, rules_en in _RULES:
-        specs.append(
-            PromptSpec(
-                key=f"exam.rules.{type_key}.zh",
-                title_zh=f"题型要求 · {label_zh}",
-                title_en=f"Rules · {label_en}",
-                category="rules",
-                variables=("max_words",) if "{{max_words}}" in rules_zh else (),
-                default=rules_zh,
+    for type_key, qtype in QUESTION_TYPES.items():
+        rules_zh, rules_en = _RULES_TEXTS[type_key]
+        for loc, rules in (("zh", rules_zh), ("en", rules_en)):
+            specs.append(
+                PromptSpec(
+                    key=f"exam.rules.{type_key}.{loc}",
+                    title_zh=f"题型要求 · {qtype.name_zh}",
+                    title_en=f"Rules · {qtype.name_en}",
+                    category="rules",
+                    variables=("max_words",) if "{{max_words}}" in rules else (),
+                    default=rules,
+                )
             )
-        )
-        specs.append(
-            PromptSpec(
-                key=f"exam.rules.{type_key}.en",
-                title_zh=f"题型要求 · {label_zh}",
-                title_en=f"Rules · {label_en}",
-                category="rules",
-                variables=("max_words",) if "{{max_words}}" in rules_en else (),
-                default=rules_en,
-            )
-        )
     return tuple(specs)
 
 

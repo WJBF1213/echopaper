@@ -1,10 +1,14 @@
-"""Full IELTS Listening paper generation (experimental, Task E1).
+"""Full IELTS Listening paper generation (experimental).
 
 Unlike ``question_gen`` (which only selects word spans for cloze), this
-module asks the LLM for complete, typed IELTS items: form / note / table /
-sentence / summary / flow-chart completion, short answer, multiple choice,
-and matching. Every item is still grounded in the transcript: the LLM must
-cite a word-index span, and the validator checks the quote verbatim.
+module asks the LLM for complete, typed IELTS items grounded in the
+transcript: the LLM must cite a word-index span, and the validator
+checks the quote verbatim.
+
+Task 9 transitional state: the type registry shrank to six keys
+(design §4); the preset/part entry point is disabled until Task 10
+rebuilds generation on the blocks API. The validators, block machinery
+and text filters below are kept for that rewrite.
 
 Design constraints kept from the existing pipeline:
   * pure stdlib + local services, no framework imports;
@@ -12,9 +16,7 @@ Design constraints kept from the existing pipeline:
     messages list; prompts come from the Task 5 registry);
   * exam rubrics and greetings are removed before the LLM sees the text,
     and the first/last content sentence of a part is protected from being
-    blanked -- the exact failure mode of the old span-only prompt;
-  * visual types (map / plan / diagram) are declared but refused unless a
-    base image is supplied by the user.
+    blanked -- the exact failure mode of the old span-only prompt.
 """
 from __future__ import annotations
 
@@ -23,14 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from app.services import llm, pos, prompts
-from app.services.exam_presets import (
-    QUESTION_TYPES,
-    GroupSpec,
-    QuestionType,
-    default_preset,
-    get_preset,
-    localized,
-)
+from app.services.exam_presets import QuestionType
 from app.services.llm import LlmError
 
 MIN_GAP_WORDS = 5
@@ -390,34 +385,30 @@ def _schema_hint(qtype: QuestionType) -> str:
 # _build_messages assembles the three-part layout of design §8.1 with the
 # prefix ordered by stability: system (global) -> stable frame (per
 # material: transcript + candidates) -> task frame (per request).
+#
+# Task 9 transitional (until Task 10's blocks API): the six-key registry
+# stores type names as name_zh/name_en (no label dict) and carries no
+# per-type paper instruction — completion composes its instruction from
+# the group's word limits (design §4.1). The blocks API reintroduces
+# per-block instructions; a generic line fills the task frame until then.
 
-#: Registry keys of the per-type rules texts. Types registered in
-#: ``exam_presets`` after a registry migration fall back to their preset
-#: text until they are added to the registry.
-_RULES_KEYS = {
-    spec.key for spec in prompts.ALL_PROMPTS if spec.category == "rules"
-}
+
+def _type_name(qtype: QuestionType, lang: str) -> str:
+    """Localized type name from the registry's two name fields."""
+    return qtype.name_zh if lang == "zh" else qtype.name_en
+
+
+_GENERIC_INSTRUCTION = "Answer the questions below."
 
 
 def _rules_text(conn, qtype: QuestionType, lang: str) -> str:
     """Per-type rules text from the prompt registry (overrides apply).
 
-    The registry derives each spec's variables from its default text:
-    completion-type rules carry ``{{max_words}}`` (the legacy templates'
-    ``{max_words}``), the other types declare none. Exactly those
-    variables are supplied, with the preset's ``max_words`` value, so a
-    default (non-overridden) render is byte-identical to the legacy
-    ``qtype.rules(lang)`` text.
+    Task 9: every registered type has a registry entry (the six-key swap
+    removed the legacy preset-text fallback), and the new rules texts
+    declare no variables.
     """
-    if f"exam.rules.{qtype.key}.{lang}" not in _RULES_KEYS:
-        return qtype.rules(lang)
-    legacy = qtype.rules_zh if lang == "zh" else qtype.rules_en
-    variables: dict[str, int] = {}
-    if "{max_words}" in legacy:
-        variables["max_words"] = qtype.max_words
-    return prompts.render_prompt(
-        conn, f"exam.rules.{qtype.key}", lang, **variables
-    )
+    return prompts.render_prompt(conn, f"exam.rules.{qtype.key}", lang)
 
 
 # -------------------------------------------------------------- validation
@@ -918,7 +909,7 @@ def _build_messages(
     texts are the Task 5 registry's verbatim migration of the legacy
     single user message; only the position of the segments changed.
     """
-    label = localized(qtype.label, lang)
+    label = _type_name(qtype, lang)
     candidates = (
         _candidate_hint(words_json, sentences, allowed, count)
         if qtype.answer_kind == "span"
@@ -963,7 +954,7 @@ def _build_messages(
                 part=part,
                 label=label,
                 count=count,
-                instruction=qtype.instruction,
+                instruction=_GENERIC_INSTRUCTION,
                 rules=rules,
                 gap=MIN_GAP_WORDS,
                 schema=_schema_hint(qtype),
@@ -1510,110 +1501,18 @@ async def generate_paper(
     lang: str = "zh",
     chat_json_fn=None,
 ) -> ExamPaper:
-    """Generate a complete typed paper for one IELTS part.
+    """T9 transitional: disabled until Task 10 rebuilds generation.
 
-    ``conn`` is the SQLite connection used to render prompts from the Task 5
-    registry (overrides included); ``lang`` is the prompt locale ("zh"/"en").
+    The part/preset contract this entry point resolved (``preset`` ->
+    ``PaperPreset`` -> per-group ``GroupSpec``) was deleted with the
+    six-key registry swap (design §4.2). Task 10 rebuilds generation on
+    the blocks API (``blocks: [{type, count}]`` with audio zoned in user
+    order, design §4.4) and reintroduces the entry point; the validators
+    and block helpers above (``_generate_block``, ``_validate_response``,
+    ``_top_up_from_candidates``, ...) are kept for that rewrite, with the
+    per-type knobs (word_limit / options_min / multi_count) resurfacing
+    as per-block or per-answer-kind data.
     """
-    if not words_json:
-        raise ExamGenError("材料没有词表，无法出题")
-    if llm_cfg is None:
-        raise ExamGenError("未配置 LLM，无法生成完整题型")
-
-    key = preset or default_preset(part)
-    paper_preset = get_preset(key)
-    if paper_preset.part != int(part):
-        raise ExamGenError(
-            f"预设 {key} 属于 Part {paper_preset.part}，不能用于 Part {part}"
-        )
-
-    paper = ExamPaper(material_id=material_id, part=int(part), preset=key)
-    ctx = build_context(words_json, sentences)
-    number = 1
-
-    # A real paper splits its part into consecutive audio zones: Part 2 opens
-    # with 5 MCQ, then continues with 5 matching. Without this, both blocks
-    # read the whole part and their items interleave.
-    visible = [
-        spec
-        for spec in paper_preset.groups
-        if not QUESTION_TYPES[spec.type_key].needs_visual
-    ]
-    content = content_ranges(words_json, sentences)
-    zones: list[list[tuple[int, int]]] = []
-    if len(visible) > 1 and content:
-        per = max(1, len(content) // len(visible))
-        for i, _spec in enumerate(visible):
-            start = i * per
-            end = len(content) if i == len(visible) - 1 else (i + 1) * per
-            zones.append(content[start:end] or content[-1:])
-    else:
-        zones = [None for _ in visible]  # type: ignore[list-item]
-
-    shared_pool_by_type: dict[str, list[str]] = {}
-    for spec, zone in zip(visible, zones):
-        qtype = QUESTION_TYPES[spec.type_key]
-        shared = shared_pool_by_type.get(qtype.key) if qtype.answer_kind == "matching" else None
-        try:
-            blocks, warnings = await _generate_block(
-                conn,
-                words_json,
-                sentences,
-                part=int(part),
-                qtype=qtype,
-                spec=spec,
-                llm_cfg=llm_cfg,
-                lang=lang,
-                ctx=ctx,
-                zone=zone,
-                shared_options=shared,
-                chat_json_fn=chat_json_fn,
-            )
-        except ExamGenError as exc:
-            paper.warnings.append(str(exc))
-            continue
-        paper.warnings.extend(warnings)
-
-        if qtype.answer_kind == "matching" and qtype.key not in shared_pool_by_type:
-            for _t, _items, options in blocks:
-                if options:
-                    shared_pool_by_type[qtype.key] = list(options)
-                    break
-
-        for title, items, options in blocks:
-            if not items:
-                continue
-            paper.groups.append(
-                ExamGroup(
-                    type_key=qtype.key,
-                    title=title or localized(qtype.label, lang),
-                    instruction=qtype.instruction,
-                    items=items,
-                    options=_letter_pool(options) if options else [],
-                )
-            )
-
-    for spec in paper_preset.groups:
-        if QUESTION_TYPES[spec.type_key].needs_visual:
-            paper.warnings.append(
-                f"{localized(QUESTION_TYPES[spec.type_key].label, lang)}"
-                "需要用户提供底图，本次已跳过"
-            )
-
-    # Number the whole paper in audio order. A preset lists MCQ before
-    # matching, but if the matched items are heard earlier they must print
-    # earlier too -- otherwise the paper's numbering contradicts the audio.
-    def earliest(group: ExamGroup) -> int:
-        times = [it.evidence[0].i0 for it in group.items if it.evidence]
-        return min(times) if times else 1 << 30
-
-    paper.groups.sort(key=earliest)
-    for item in (it for group in paper.groups for it in group.items):
-        item.number = number
-        number += 1
-
-    if paper.total_items == 0:
-        raise ExamGenError(
-            "没有生成任何可用题目；请检查转写内容或 LLM 返回"
-        )
-    return paper
+    raise ExamGenError(
+        "试卷生成正在按 blocks API 重写（Task 10），暂不可用"
+    )

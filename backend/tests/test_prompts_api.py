@@ -46,7 +46,9 @@ def test_list_prompts(client):
     resp = client.get("/api/prompts")
     assert resp.status_code == 200
     entries = resp.json()
-    assert len(entries) == len(prompts.ALL_PROMPTS) == 32
+    # T9: the registry is data-driven; its size follows ALL_PROMPTS
+    # (18 after the six-key swap) instead of a hardcoded count.
+    assert len(entries) == len(prompts.ALL_PROMPTS)
 
     fields = {"key", "title", "category", "variables", "default", "current",
               "customized"}
@@ -68,8 +70,7 @@ def test_list_prompts(client):
         ).json()
     }
     assert en["exam.system.zh"]["title"] == "System prompt · Chinese"
-    assert en["exam.rules.form_completion.en"]["title"] == (
-        "Rules · Form completion")
+    assert en["exam.rules.completion.en"]["title"] == "Rules · Completion"
 
 
 def test_put_override_and_reset(client):

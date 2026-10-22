@@ -51,11 +51,9 @@ class SetCreateIn(BaseModel):
     transcript_override: Optional[str] = None
 
 
-class ExamGenerateIn(BaseModel):
-    """Exploration branch: request a full typed paper for one part."""
-
-    part: int = Field(default=1, ge=1, le=4)
-    preset: Optional[str] = None
+# T10: the paper-generation request schema (blocks: [{type, count}], design
+# §5.2) arrives with the blocks API; the old part/preset body went away
+# with the preset registry in Task 9.
 
 
 class AnswerIn(BaseModel):
