@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from app import db
+from app import db, i18n
 from app.services import llm
 
 GTX_URL = "https://translate.googleapis.com/translate_a/single"
@@ -75,7 +75,7 @@ async def _gtx(client: httpx.AsyncClient, text: str) -> str:
     ]
     result = "".join(parts).strip()
     if not result:
-        raise ValueError("gtx 空结果")
+        raise ValueError(i18n.t("translate.gtx_empty"))
     return result
 
 
@@ -87,7 +87,7 @@ async def _mymemory(client: httpx.AsyncClient, text: str) -> str:
     data = resp.json()
     result = (data.get("responseData") or {}).get("translatedText") or ""
     if not result or "MYMEMORY WARNING" in result.upper():
-        raise ValueError("MyMemory 无有效结果")
+        raise ValueError(i18n.t("translate.mymemory_empty"))
     return result
 
 
@@ -123,8 +123,8 @@ async def translate(
             try:
                 obj = await llm.chat_json(
                     llm_cfg,
-                    "你是英译中翻译引擎，只返回 JSON。",
-                    f"将下面的英文句子翻译成简体中文：\n{text}",
+                    i18n.t("translate.system"),
+                    i18n.t("translate.user", text=text),
                     TRANSLATION_SCHEMA,
                 )
                 dst = (obj.get("translation") or "").strip()
@@ -133,7 +133,7 @@ async def translate(
                     return dst
             except Exception:
                 pass
-        raise TranslateError("全部翻译渠道失败（gtx / MyMemory / LLM）")
+        raise TranslateError(i18n.t("translate.all_failed"))
     finally:
         if own:
             await client.aclose()

@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from app import i18n
 from app.services import llm, pos
 from app.services.llm import LlmError
 
@@ -43,22 +44,9 @@ ITEMS_SCHEMA = {
     "required": ["items"],
 }
 
-SYSTEM_PROMPT = (
-    "你是雅思听力填空题（sentence / note completion）命题专家。"
-    "输入是带词索引的转写文本，你要选出值得考的挖空跨度。\n"
-    "命题规则：\n"
-    "1. 答案必须是转写原文中逐字连续的一段，不得改写、翻译、缩写或补全。\n"
-    "2. 每个空 1-3 个词；整段只用一个词数上限，因此不要超过 3 词。\n"
-    "3. 名词或名词短语优先；数字、时间、价格、邮编、电话号码是优质答案。\n"
-    "4. 专有名词（人名、地名、机构名）只有在原文中已逐字母拼读时才可以选；"
-    "未拼读的专有名词一律不要选。\n"
-    "5. 相邻两个空之间至少间隔 5 个词，且按原文顺序排列。\n"
-    "6. 不要选：每句开头两个词、问候或告别用语、以及紧挨着取值被直接写出的标签词"
-    "（例如 \"The postcode is GU7 4BX\" 中不要选 postcode，应选 GU7 4BX）。\n"
-    "7. 不要选仅凭上下文就能猜出的词（固定搭配的另一半、被相邻词直接提示的词）。\n"
-    "8. 优先选择需要听懂具体信息才能填对的位置，而不是语法功能词。\n"
-    "只返回 JSON 对象，不要任何解释性文字。"
-)
+# Default-locale snapshot for callers that want the prompt text directly;
+# generate_set() re-resolves it per request via i18n.t().
+SYSTEM_PROMPT = i18n.t("question_gen.system")
 
 
 class QuestionGenError(Exception):
@@ -204,15 +192,13 @@ def _user_prompt(
         f"{i}:{words_json[i]['w']}" for i in range(a, b + 1)
     )
     cand_hint = _candidate_hint(words_json, candidates, a, b)
-    return (
-        f"文本词索引 {a} 到 {b}（含）：\n{lines}\n\n"
-        f"已通过规则预筛的候选（索引 原文 类型）：\n{cand_hint}\n\n"
-        f"请选择恰好 {quota} 个挖空，优先从上面的候选中选，也可以选候选之外的跨度，"
-        "但必须满足系统提示里的全部规则。\n"
-        "返回 JSON："
-        '{"items":[{"i0":起词索引,"i1":止词索引,'
-        '"answer":"原文逐字答案","type":"noun|number|name|verb|adj",'
-        '"reason":"简短理由"}]}'
+    return i18n.t(
+        "question_gen.user",
+        a=a,
+        b=b,
+        lines=lines,
+        candidates=cand_hint,
+        quota=quota,
     )
 
 
@@ -421,7 +407,7 @@ async def generate_set(
 ) -> GeneratedSet:
     """Full pipeline: LLM span selection -> validation -> retry -> fallback."""
     if not words_json or blank_count < 1:
-        raise QuestionGenError("材料为空或空数无效，无法生成题目")
+        raise QuestionGenError(i18n.t("question_gen.empty"))
 
     candidates = pos.build_candidates(
         words_json, sentences, blank_count, tag_words_fn
@@ -438,16 +424,17 @@ async def generate_set(
         chunks = _plan_chunks(words_json, sentences, candidates, blank_count, budget)
 
         rejected: list[str] = []
+        system_prompt = i18n.t("question_gen.system")
         for a, b, quota in chunks:
             try:
                 obj = await chat(
                     llm_cfg,
-                    SYSTEM_PROMPT,
+                    system_prompt,
                     _user_prompt(words_json, a, b, candidates, quota),
                     ITEMS_SCHEMA,
                 )
             except LlmError as exc:
-                rejected.append(f"LLM 调用失败：{exc}")
+                rejected.append(i18n.t("question_gen.llm_failed", error=exc))
                 continue
             items, rej = validate_items(obj.get("items", []), words_json, sentences)
             llm_items.extend(items)
@@ -465,7 +452,7 @@ async def generate_set(
                 + "\n请避开这些问题重新选择。"
             )
             try:
-                obj = await chat(llm_cfg, SYSTEM_PROMPT, retry_user, ITEMS_SCHEMA)
+                obj = await chat(llm_cfg, system_prompt, retry_user, ITEMS_SCHEMA)
                 items, _rej2 = validate_items(
                     obj.get("items", []), words_json, sentences
                 )
@@ -499,9 +486,7 @@ async def generate_set(
     )
 
     if not merged:
-        raise QuestionGenError(
-            "无法生成题目：候选词不足或全部校验失败，请检查转写文本"
-        )
+        raise QuestionGenError(i18n.t("question_gen.no_candidates"))
 
     blanks = [
         _to_blank(it, words_json, pos_)

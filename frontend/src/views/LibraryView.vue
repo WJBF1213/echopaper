@@ -6,6 +6,7 @@ import { showToast } from '../router'
 import { useJobPolling } from '../composables/useJobPolling'
 import { useBatchPolling } from '../composables/useBatchPolling'
 import { fmtDateTime } from '../lib/time'
+import { t } from '../i18n'
 import MaterialForm from '../components/MaterialForm.vue'
 import MaterialCard from '../components/MaterialCard.vue'
 import JobProgress from '../components/JobProgress.vue'
@@ -23,10 +24,10 @@ const loading = ref(false)
 const { job, start } = useJobPolling(async (finished) => {
   await load()
   if (finished.state === 'done' && finished.material_id) {
-    showToast('出题完成')
+    showToast(t('library.job.done'))
     void router.push(`/material/${finished.material_id}`)
   } else if (finished.state === 'error') {
-    showToast(finished.message || '处理失败', 'error', 8000)
+    showToast(finished.message || t('common.failed'), 'error', 8000)
   }
 })
 
@@ -36,12 +37,12 @@ const { batch, start: startBatch } = useBatchPolling(async (finished, watched) =
   if (!watched) return
   if (finished.error) {
     showToast(
-      `批量导入结束：${finished.done} 个成功，${finished.error} 个失败`,
+      t('library.batch.doneWithErrors', { done: finished.done, error: finished.error }),
       'error',
       8000,
     )
   } else {
-    showToast(`批量导入完成：${finished.done} 个材料已入库`)
+    showToast(t('library.batch.done', { done: finished.done }))
   }
 })
 
@@ -75,10 +76,10 @@ function openMaterial(materialId: string) {
 }
 
 async function remove(material: MaterialListItem) {
-  if (!window.confirm(`删除材料「${material.name}」？题目、成绩与错词记录将一并删除。`)) return
+  if (!window.confirm(t('library.delete.confirm', { name: material.name }))) return
   try {
     await api.deleteMaterial(material.id)
-    showToast('已删除')
+    showToast(t('library.delete.done'))
     await load()
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
@@ -94,10 +95,13 @@ onMounted(() => {
 <template>
   <div>
     <header class="page-head">
-      <h1>听力填空练习</h1>
+      <h1>{{ t('library.title') }}</h1>
       <p class="sub">
-        上传音频或粘贴原文，自动生成填空题。练习时按
-        <kbd>空格</kbd> 播放，<kbd>←</kbd> <kbd>→</kbd> 前后 5 秒，<kbd>回车</kbd> 批改。
+        {{ t('library.subtitle.before') }}
+        <kbd>{{ t('library.key.space') }}</kbd> {{ t('library.subtitle.after') }}
+        <kbd>{{ t('library.key.left') }}</kbd> <kbd>{{ t('library.key.right') }}</kbd>
+        {{ t('library.subtitle.afterArrows') }}
+        <kbd>{{ t('library.key.enter') }}</kbd> {{ t('library.subtitle.end') }}
       </p>
     </header>
 
@@ -109,8 +113,8 @@ onMounted(() => {
 
     <section v-if="batches.length" class="card">
       <div class="cardtitle">
-        <h2>批量导入记录</h2>
-        <span class="hint">点击查看进度</span>
+        <h2>{{ t('library.batches.title') }}</h2>
+        <span class="hint">{{ t('library.batches.hint') }}</span>
       </div>
       <div class="batchlist">
         <button
@@ -121,10 +125,10 @@ onMounted(() => {
           @click="startBatch(b.id)"
         >
           <span class="bname">{{ b.name }}</span>
-          <span class="bmeta">{{ b.done }}/{{ b.total }} 完成</span>
-          <span v-if="b.error" class="chip bad">{{ b.error }} 失败</span>
-          <span v-else-if="b.running" class="chip">{{ b.running }} 进行中</span>
-          <span v-else class="chip ok">已完成</span>
+          <span class="bmeta">{{ t('library.batches.done', { done: b.done, total: b.total }) }}</span>
+          <span v-if="b.error" class="chip bad">{{ t('library.batches.failed', { n: b.error }) }}</span>
+          <span v-else-if="b.running" class="chip">{{ t('library.batches.running', { n: b.running }) }}</span>
+          <span v-else class="chip ok">{{ t('library.batches.completed') }}</span>
           <span class="btime">{{ fmtDateTime(b.created_at) }}</span>
         </button>
       </div>
@@ -132,18 +136,18 @@ onMounted(() => {
 
     <section class="card">
       <div class="cardtitle">
-        <h2>材料</h2>
+        <h2>{{ t('library.materials.title') }}</h2>
         <label class="search">
           <Icon name="search" :size="14" />
-          <input v-model="query" type="search" placeholder="按名称搜索" aria-label="搜索材料" />
+          <input v-model="query" type="search" :placeholder="t('library.search.placeholder')" :aria-label="t('library.search.aria')" />
         </label>
       </div>
 
-      <div v-if="loading" class="empty-tip">加载中…</div>
+      <div v-if="loading" class="empty-tip">{{ t('common.loading') }}</div>
       <div v-else-if="!materials.length" class="empty-tip">
-        还没有材料。上传音频或粘贴原文即可创建第一份练习。
+        {{ t('library.empty') }}
       </div>
-      <div v-else-if="!filtered.length" class="empty-tip">没有匹配「{{ query }}」的材料</div>
+      <div v-else-if="!filtered.length" class="empty-tip">{{ t('library.emptyFiltered', { query }) }}</div>
       <div v-else class="matlist">
         <MaterialCard
           v-for="m in filtered"
@@ -156,7 +160,7 @@ onMounted(() => {
     </section>
 
     <section class="card">
-      <h2>本地识别</h2>
+      <h2>{{ t('library.asr.title') }}</h2>
       <AsrStatusChip />
     </section>
   </div>

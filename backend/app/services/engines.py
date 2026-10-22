@@ -1,12 +1,16 @@
 """ASR engine lifecycle manager (Task B9, spec §7).
 
-Dual engines (parakeet-mlx / mlx-whisper) are equal first-class citizens.
-Lazy load on first transcription, idle auto-unload with gc, immediate
-unload on switch. One asyncio lock serializes lifecycle operations; a
-semaphore serializes transcriptions (acquire..release). Busy -> unload /
-switch are REJECTED, never deadlock. MLX imports happen only inside the
-concrete engine constructors (lazy), so this module imports cleanly on
-any platform.
+Three engines, one interface:
+- ``parakeet`` / ``whisper``: MLX/Metal, Apple Silicon only
+- ``faster_whisper``: CTranslate2, Windows / macOS / Linux (CUDA or CPU)
+
+Availability is platform-aware: Apple Silicon exposes all three, every
+other machine exposes only faster-whisper. Lazy load on first
+transcription, idle auto-unload with gc, immediate unload on switch. One
+asyncio lock serializes lifecycle operations; a semaphore serializes
+transcriptions (acquire..release). Busy -> unload / switch are REJECTED,
+never deadlock. Engine imports happen only inside the concrete engine
+constructors (lazy), so this module imports cleanly on any platform.
 
 Stdlib + engines only; no framework imports.
 """
@@ -14,10 +18,15 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import platform
+import sys
 import time
 from typing import Any, Callable, Protocol
 
-ENGINE_NAMES = ("parakeet", "whisper")
+from app import i18n
+
+ENGINE_NAMES = ("parakeet", "whisper", "faster_whisper")
+FALLBACK_ENGINE = "faster_whisper"
 
 
 class EngineError(Exception):
@@ -30,8 +39,35 @@ class AsrEngine(Protocol):
     def transcribe(self, path: str) -> list[dict]: ...
 
 
+def _is_apple_silicon(
+    platform_name: str | None = None, machine: str | None = None
+) -> bool:
+    name = platform_name or sys.platform
+    arch = (machine or platform.machine()).lower()
+    return name == "darwin" and arch in ("arm64", "aarch64")
+
+
+def available_engines(
+    platform_name: str | None = None, machine: str | None = None
+) -> tuple[str, ...]:
+    """Engines that can actually run on this machine.
+
+    MLX requires Apple Silicon; Intel Macs (and everything else) use
+    faster-whisper, which is the universal CTranslate2 path.
+    """
+    if _is_apple_silicon(platform_name, machine):
+        return ENGINE_NAMES
+    return (FALLBACK_ENGINE,)
+
+
+def default_engine(
+    platform_name: str | None = None, machine: str | None = None
+) -> str:
+    return "parakeet" if _is_apple_silicon(platform_name, machine) else FALLBACK_ENGINE
+
+
 def default_factory(engine_name: str, model: str) -> Any:
-    """Construct an engine, importing its MLX deps lazily (darwin only)."""
+    """Construct an engine, importing its deps lazily."""
     if engine_name == "parakeet":
         from app.services.parakeet_engine import ParakeetEngine
 
@@ -40,13 +76,18 @@ def default_factory(engine_name: str, model: str) -> Any:
         from app.services.whisper_engine import WhisperEngine
 
         return WhisperEngine(model)
-    raise EngineError(f"未知引擎：{engine_name}")
+    if engine_name == FALLBACK_ENGINE:
+        from app.services.faster_whisper_engine import FasterWhisperEngine
+
+        return FasterWhisperEngine(model)
+    raise EngineError(i18n.t("engine.unknown", name=engine_name))
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "engine": "parakeet",
+    "engine": default_engine(),
     "parakeet_model": "mlx-community/parakeet-tdt-0.6b-v3",
     "whisper_model": "mlx-community/whisper-large-v3-turbo",
+    "faster_whisper_model": "large-v3-turbo",
     "idle_unload_min": 10,
 }
 
@@ -74,6 +115,10 @@ class EngineManager:
         self._busy = False
         self._state = "unloaded"  # unloaded | loading | ready | error
         self._detail: str | None = None
+        # Informational warning kept apart from _detail (which holds the
+        # latest load/busy error) so a platform fallback stays visible after
+        # the fallback engine loads successfully.
+        self._fallback_detail: str | None = None
         self._last_used: float | None = None
         self._timer: asyncio.Task | None = None
 
@@ -88,6 +133,7 @@ class EngineManager:
         if on_switch is not None:
             self._on_switch = on_switch
         self._engine_name = None  # re-read selected engine from new settings
+        self._fallback_detail = None
 
     # ------------------------------------------------------------------ util
     def _settings(self) -> dict:
@@ -97,7 +143,17 @@ class EngineManager:
 
     def _current_name(self) -> str:
         if self._engine_name is None:
-            self._engine_name = self._settings().get("engine", "parakeet")
+            stored = self._settings().get("engine") or default_engine()
+            self._fallback_detail = None
+            # A .env copied from a Mac may name an MLX engine; on other
+            # platforms fall back instead of failing every transcription.
+            if stored not in available_engines():
+                fallback = default_engine()
+                self._fallback_detail = i18n.t(
+                    "engine.fallback", requested=stored, fallback=fallback
+                )
+                stored = fallback
+            self._engine_name = stored
         return self._engine_name
 
     def status(self) -> dict:
@@ -111,8 +167,9 @@ class EngineManager:
         }
         if self._last_used is not None:
             out["last_used"] = self._last_used
-        if self._detail:
-            out["detail"] = self._detail
+        detail = self._detail or self._fallback_detail
+        if detail:
+            out["detail"] = detail
         return out
 
     # -------------------------------------------------------------- lifecycle
@@ -127,8 +184,8 @@ class EngineManager:
             self._engine = None
             self._loaded_name = None
             self._state = "error"
-            self._detail = (
-                f"{engine_name} 引擎加载失败：{exc}；请在设置页更换引擎或模型"
+            self._detail = i18n.t(
+                "engine.load_failed", engine=engine_name, error=exc
             )
             raise EngineError(self._detail) from exc
         self._engine = engine
@@ -180,7 +237,7 @@ class EngineManager:
             engine_name = self._current_name()
             if self._engine is None or self._loaded_name != engine_name:
                 if self._busy:
-                    raise EngineError("引擎选择已变更，请等待当前转写完成")
+                    raise EngineError(i18n.t("engine.changed_wait"))
                 await self._load_locked(engine_name)
         await self._gate.acquire()
         self._busy = True
@@ -188,7 +245,7 @@ class EngineManager:
         if self._engine is None:  # unloaded between lock and gate
             self._busy = False
             self._gate.release()
-            raise EngineError("引擎已被卸载，请重试")
+            raise EngineError(i18n.t("engine.unloaded_retry"))
         return self._engine
 
     async def release(self) -> None:
@@ -205,7 +262,7 @@ class EngineManager:
         async with self._lock:
             if self._busy:
                 return {**self.status(), "busy": True,
-                        "detail": "busy：转写进行中，禁止卸载"}
+                        "detail": i18n.t("engine.busy_unload")}
             self._cancel_timer()
             self._drop_locked()
             return self.status()
@@ -213,15 +270,24 @@ class EngineManager:
     async def switch(self, engine_name: str) -> dict:
         """Switch engine: unload current immediately; busy -> reject."""
         if engine_name not in ENGINE_NAMES:
-            raise EngineError(f"未知引擎：{engine_name}")
+            raise EngineError(i18n.t("engine.unknown", name=engine_name))
+        if engine_name not in available_engines():
+            raise EngineError(
+                i18n.t(
+                    "engine.unsupported",
+                    name=engine_name,
+                    available=", ".join(available_engines()),
+                )
+            )
         async with self._lock:
             if self._busy:
                 return {**self.status(), "busy": True,
-                        "detail": "busy：转写进行中，禁止切换"}
+                        "detail": i18n.t("engine.busy_switch")}
             self._cancel_timer()
             if self._engine is not None:
                 self._drop_locked()
             self._engine_name = engine_name
+            self._fallback_detail = None
             try:
                 self._on_switch(engine_name)
             except Exception:

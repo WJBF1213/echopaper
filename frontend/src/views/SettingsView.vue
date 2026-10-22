@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { api, type AsrStatus, type Settings, type SettingsPatch } from '../api'
 import { showToast } from '../router'
+import { t } from '../i18n'
 import Icon from '../components/Icon.vue'
 
 const settings = ref<Settings | null>(null)
@@ -20,23 +21,42 @@ const form = reactive({
   engine: 'parakeet',
   parakeetModel: '',
   whisperModel: '',
+  fasterWhisperModel: '',
   idleUnloadMin: 10,
   blankCount: 10,
+  availableEngines: ['faster_whisper'] as string[],
 })
 
-const PRESETS: Record<string, { baseUrl: string; model: string; label: string }> = {
+function engineLabel(name: string): string {
+  switch (name) {
+    case 'parakeet':
+      return t('settings.engine.parakeet')
+    case 'whisper':
+      return t('settings.engine.whisper')
+    case 'faster_whisper':
+      return t('settings.engine.fasterWhisper')
+    default:
+      return name
+  }
+}
+
+const PRESETS: Record<string, { baseUrl: string; model: string; labelKey: string }> = {
   zhipu: {
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     model: 'glm-4.7-flash',
-    label: '智谱 GLM',
+    labelKey: 'settings.provider.zhipu',
   },
   dashscope: {
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     model: 'qwen-flash',
-    label: '阿里百炼',
+    labelKey: 'settings.provider.dashscope',
   },
-  deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', label: 'DeepSeek' },
-  custom: { baseUrl: '', model: '', label: '自定义（OpenAI 兼容）' },
+  deepseek: {
+    baseUrl: 'https://api.deepseek.com/v1',
+    model: 'deepseek-chat',
+    labelKey: 'settings.provider.deepseek',
+  },
+  custom: { baseUrl: '', model: '', labelKey: 'settings.provider.custom' },
 }
 
 function onProviderChange() {
@@ -60,8 +80,13 @@ async function load() {
     form.engine = s.asr.engine
     form.parakeetModel = s.asr.parakeet_model
     form.whisperModel = s.asr.whisper_model
+    form.fasterWhisperModel = s.asr.faster_whisper_model
     form.idleUnloadMin = s.asr.idle_unload_min
     form.blankCount = s.gen.blank_count
+    form.availableEngines = s.asr.available_engines ?? ['faster_whisper']
+    if (!form.availableEngines.includes(form.engine)) {
+      form.engine = s.asr.default_engine ?? form.availableEngines[0]
+    }
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
   } finally {
@@ -90,6 +115,7 @@ async function save() {
         engine: form.engine,
         parakeet_model: form.parakeetModel,
         whisper_model: form.whisperModel,
+        faster_whisper_model: form.fasterWhisperModel,
         idle_unload_min: form.idleUnloadMin,
       },
       gen: { blank_count: form.blankCount },
@@ -97,7 +123,7 @@ async function save() {
     settings.value = updated
     apiKey.value = ''
     asrStatus.value = await api.asrStatus()
-    showToast('设置已保存')
+    showToast(t('settings.llm.savedToast'))
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
   } finally {
@@ -117,7 +143,7 @@ async function testLlm() {
     apiKey.value = ''
     const res = await api.testLlm(patch)
     testMessage.value = res.message
-    showToast(res.ok ? '连接正常，配置已保存' : res.message, res.ok ? 'info' : 'error')
+    showToast(res.ok ? t('settings.llm.testOkToast') : res.message, res.ok ? 'info' : 'error')
   } catch (err) {
     testMessage.value = err instanceof Error ? err.message : String(err)
     showToast(testMessage.value, 'error')
@@ -129,7 +155,7 @@ async function testLlm() {
 async function engineAction(action: 'load' | 'unload') {
   try {
     asrStatus.value = action === 'load' ? await api.asrLoad() : await api.asrUnload()
-    showToast(action === 'load' ? '识别模型已加载' : '识别模型已卸载')
+    showToast(action === 'load' ? t('settings.asr.loadedToast') : t('settings.asr.unloadedToast'))
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
   }
@@ -141,41 +167,43 @@ onMounted(load)
 <template>
   <div>
     <header class="page-head">
-      <h1>设置</h1>
-      <p class="sub">配置只保存在本机数据库。API 密钥只写不读。</p>
+      <h1>{{ t('settings.title') }}</h1>
+      <p class="sub">{{ t('settings.subtitle') }}</p>
     </header>
 
-    <div v-if="loading" class="card empty-tip">加载中…</div>
+    <div v-if="loading" class="card empty-tip">{{ t('common.loading') }}</div>
     <template v-else>
       <section class="card">
-        <h2>出题模型</h2>
+        <h2>{{ t('settings.llm.title') }}</h2>
         <div class="grid">
           <label class="field">
-            <span class="tag">服务商</span>
+            <span class="tag">{{ t('settings.llm.provider') }}</span>
             <select v-model="form.provider" @change="onProviderChange">
               <option v-for="(preset, key) in PRESETS" :key="key" :value="key">
-                {{ preset.label }}
+                {{ t(preset.labelKey) }}
               </option>
             </select>
           </label>
           <label class="field">
-            <span class="tag">接口地址</span>
+            <span class="tag">{{ t('settings.llm.baseUrl') }}</span>
             <input v-model="form.baseUrl" type="text" placeholder="https://…" />
           </label>
           <label class="field">
-            <span class="tag">模型</span>
+            <span class="tag">{{ t('settings.llm.model') }}</span>
             <input v-model="form.model" type="text" placeholder="glm-4.7-flash" />
           </label>
           <label class="field">
-            <span class="tag">API 密钥</span>
+            <span class="tag">{{ t('settings.llm.apiKey') }}</span>
             <input
               v-model="apiKey"
               type="password"
-              :placeholder="settings?.llm.has_key ? `已保存 ${settings.llm.key_masked}` : '未配置'"
+              :placeholder="settings?.llm.has_key
+              ? t('settings.llm.apiKey.saved', { masked: settings.llm.key_masked ?? '' })
+              : t('settings.llm.apiKey.empty')"
             />
           </label>
           <label class="field">
-            <span class="tag">上下文上限（tokens）</span>
+            <span class="tag">{{ t('settings.llm.context') }}</span>
             <input
               v-model.number="form.maxContextTokens"
               type="number"
@@ -188,34 +216,39 @@ onMounted(load)
         <div class="row" style="margin-top: 14px">
           <button class="ghost small" type="button" :disabled="testing" @click="testLlm">
             <Icon name="spark" :size="13" />
-            {{ testing ? '测试中…' : '保存并测试' }}
+            {{ testing ? t('settings.llm.testing') : t('settings.llm.test') }}
           </button>
           <span class="hint">
-            {{ testMessage || '会先保存上面的模型配置，再发一次真实请求；未配置密钥时使用本地规则出题。' }}
+            {{ testMessage || t('settings.llm.hint') }}
           </span>
         </div>
       </section>
 
       <section class="card">
-        <h2>语音识别</h2>
+        <h2>{{ t('settings.asr.title') }}</h2>
         <div class="grid">
           <label class="field">
-            <span class="tag">引擎</span>
+            <span class="tag">{{ t('settings.asr.engine') }}</span>
             <select v-model="form.engine">
-              <option value="parakeet">parakeet-mlx</option>
-              <option value="whisper">mlx-whisper</option>
+              <option v-for="name in form.availableEngines" :key="name" :value="name">
+                {{ engineLabel(name) }}
+              </option>
             </select>
           </label>
           <label class="field">
-            <span class="tag">Parakeet 模型</span>
+            <span class="tag">{{ t('settings.asr.parakeetModel') }}</span>
             <input v-model="form.parakeetModel" type="text" />
           </label>
           <label class="field">
-            <span class="tag">Whisper 模型</span>
+            <span class="tag">{{ t('settings.asr.whisperModel') }}</span>
             <input v-model="form.whisperModel" type="text" />
           </label>
           <label class="field">
-            <span class="tag">空闲卸载（分钟）</span>
+            <span class="tag">{{ t('settings.asr.fasterWhisperModel') }}</span>
+            <input v-model="form.fasterWhisperModel" type="text" />
+          </label>
+          <label class="field">
+            <span class="tag">{{ t('settings.asr.idle') }}</span>
             <input v-model.number="form.idleUnloadMin" type="number" min="0" max="240" />
           </label>
         </div>
@@ -227,16 +260,16 @@ onMounted(load)
           >
             {{ asrStatus.state }} · {{ asrStatus.engine }}
           </span>
-          <button class="ghost small" type="button" @click="engineAction('load')">立即加载</button>
-          <button class="ghost small" type="button" @click="engineAction('unload')">立即卸载</button>
-          <span class="hint">切换引擎会立即释放当前模型。</span>
+          <button class="ghost small" type="button" @click="engineAction('load')">{{ t('settings.asr.load') }}</button>
+          <button class="ghost small" type="button" @click="engineAction('unload')">{{ t('settings.asr.unload') }}</button>
+          <span class="hint">{{ t('settings.asr.hint') }}</span>
         </div>
       </section>
 
       <section class="card">
-        <h2>默认值</h2>
+        <h2>{{ t('settings.defaults.title') }}</h2>
         <label class="field" style="max-width: 180px">
-          <span class="tag">每次出题数</span>
+          <span class="tag">{{ t('settings.defaults.blankCount') }}</span>
           <input v-model.number="form.blankCount" type="number" min="1" max="40" />
         </label>
       </section>
@@ -244,7 +277,7 @@ onMounted(load)
       <div class="row">
         <button class="big" type="button" :disabled="saving" @click="save">
           <Icon name="check" :size="14" />
-          {{ saving ? '保存中…' : '保存设置' }}
+          {{ saving ? t('settings.saving') : t('settings.save') }}
         </button>
       </div>
     </template>

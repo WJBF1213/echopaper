@@ -27,6 +27,7 @@ class AsrSettingsIn(BaseModel):
     engine: Optional[str] = None
     parakeet_model: Optional[str] = None
     whisper_model: Optional[str] = None
+    faster_whisper_model: Optional[str] = None
     idle_unload_min: Optional[int] = None
 
 
@@ -48,6 +49,13 @@ class SetCreateIn(BaseModel):
     mode: str = "llm"  # 'llm' | 'nouns' | 'manual'
     blank_count: int = Field(default=10, ge=0, le=40)
     transcript_override: Optional[str] = None
+
+
+class ExamGenerateIn(BaseModel):
+    """Exploration branch: request a full typed paper for one part."""
+
+    part: int = Field(default=1, ge=1, le=4)
+    preset: Optional[str] = None
 
 
 class AnswerIn(BaseModel):

@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { api } from '../api'
 import { showToast } from '../router'
+import { t } from '../i18n'
 import Icon from './Icon.vue'
 
 const emit = defineEmits<{ created: [batchId: string] }>()
@@ -50,7 +51,7 @@ function onFiles(event: Event) {
   }
   files.value = merged
   if (rejected.length) {
-    showToast(`已跳过不支持的格式：${rejected.join('、')}`, 'error', 6000)
+    showToast(t('batch.error.unsupported', { files: rejected.join(', ') }), 'error', 6000)
   }
 }
 
@@ -60,7 +61,7 @@ function removeFile(index: number) {
 
 async function submit() {
   if (!files.value.length) {
-    showToast('请先选择至少一个音频文件', 'error')
+    showToast(t('batch.error.noFiles'), 'error')
     return
   }
   submitting.value = true
@@ -72,7 +73,7 @@ async function submit() {
       mode: mode.value,
       blankCount: blankCount.value,
     })
-    showToast(`已导入 ${res.jobs.length} 个音频，开始转写`)
+    showToast(t('batch.imported', { n: res.jobs.length }))
     files.value = []
     name.value = ''
     emit('created', res.batch_id)
@@ -87,17 +88,17 @@ async function submit() {
 <template>
   <section class="card">
     <div class="cardtitle">
-      <h2>批量转写</h2>
-      <span class="chip">多文件</span>
+      <h2>{{ t('batch.title') }}</h2>
+      <span class="chip">{{ t('batch.badge') }}</span>
     </div>
 
     <div class="grid">
       <label class="field">
-        <span class="tag">批次名称（可选）</span>
-        <input v-model="name" type="text" placeholder="例如：剑桥 18 全套" />
+        <span class="tag">{{ t('batch.name') }}</span>
+        <input v-model="name" type="text" :placeholder="t('batch.name.placeholder')" />
       </label>
       <label class="field">
-        <span class="tag">选择音频</span>
+        <span class="tag">{{ t('batch.choose') }}</span>
         <input
           ref="inputEl"
           type="file"
@@ -116,41 +117,41 @@ async function submit() {
         <button
           class="icon-btn"
           type="button"
-          title="移除"
-          aria-label="移除"
+          :title="t('batch.remove')"
+          :aria-label="t('batch.remove')"
           @click="removeFile(index)"
         >
           <Icon name="trash" :size="13" />
         </button>
       </div>
-      <p class="hint">{{ files.length }} 个文件 · {{ totalMb.toFixed(1) }} MB · 逐个转写，全部保存到材料库</p>
+      <p class="hint">{{ t('batch.summary', { count: files.length, size: totalMb.toFixed(1) }) }}</p>
     </div>
 
     <div class="options">
       <label class="check">
         <input v-model="generateSets" type="checkbox" />
-        转写后顺便出题
+        {{ t('batch.generate') }}
       </label>
       <template v-if="generateSets">
         <label class="field inline">
-          <span class="tag">方式</span>
+          <span class="tag">{{ t('batch.mode') }}</span>
           <select v-model="mode">
-            <option value="nouns">本地规则</option>
-            <option value="llm">混合出题</option>
+            <option value="nouns">{{ t('mode.nouns') }}</option>
+            <option value="llm">{{ t('mode.llm') }}</option>
           </select>
         </label>
         <label class="field inline">
-          <span class="tag">题数</span>
+          <span class="tag">{{ t('batch.count') }}</span>
           <input v-model.number="blankCount" type="number" min="5" max="40" />
         </label>
       </template>
-      <span v-else class="hint">默认只转写并入库，之后可在材料页随时出题。</span>
+      <span v-else class="hint">{{ t('batch.generateOff') }}</span>
     </div>
 
     <div class="actions">
       <button class="big" type="button" :disabled="submitting || !files.length" @click="submit">
         <Icon name="upload" :size="14" />
-        {{ submitting ? '上传中…' : `开始批量转写${files.length ? `（${files.length}）` : ''}` }}
+        {{ submitting ? t('batch.submitting') : files.length ? t('batch.submitCount', { n: files.length }) : t('batch.submit') }}
       </button>
     </div>
   </section>

@@ -5,9 +5,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app import db
+from app import db, i18n
 from app.config import load_settings
 from app.schemas import LlmTestIn, SettingsIn
+from app.services import engines as engines_mod
 from app.services import llm as llm_mod
 
 router = APIRouter()
@@ -28,7 +29,10 @@ def effective_settings(conn) -> dict:
             "engine": s.asr.engine,
             "parakeet_model": s.asr.parakeet_model,
             "whisper_model": s.asr.whisper_model,
+            "faster_whisper_model": s.asr.faster_whisper_model,
             "idle_unload_min": s.asr.idle_unload_min,
+            "available_engines": list(engines_mod.available_engines()),
+            "default_engine": engines_mod.default_engine(),
         },
         "gen": {"blank_count": s.gen.blank_count},
     }
@@ -90,6 +94,15 @@ async def put_settings(body: SettingsIn, request: Request):
     if body.asr is not None:
         patch = body.asr.model_dump(exclude_none=True)
         old_engine = current["asr"].get("engine")
+        if patch.get("engine") and patch["engine"] not in engines_mod.available_engines():
+            raise HTTPException(
+                status_code=400,
+                detail=i18n.t(
+                    "engine.unsupported",
+                    name=patch["engine"],
+                    available=", ".join(engines_mod.available_engines()),
+                ),
+            )
         current["asr"].update(patch)
         db.set_setting(conn, "asr", current["asr"])
         new_engine = current["asr"].get("engine")
@@ -126,7 +139,7 @@ async def test_llm(request: Request, body: LlmTestIn | None = None):
     if not (cfg.get("api_key") or "").strip():
         return {
             "ok": False,
-            "message": "未配置 LLM API key：请填写密钥后点击「保存并测试」",
+            "message": i18n.t("llm.no_key"),
         }
     ok, message = await llm_mod.test_connection(cfg)
     return {"ok": ok, "message": message}

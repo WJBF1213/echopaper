@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, type AsrStatus } from '../api'
 import { showToast } from '../router'
+import { t } from '../i18n'
 import Icon from './Icon.vue'
 
 const status = ref<AsrStatus | null>(null)
@@ -11,13 +12,13 @@ let timer: ReturnType<typeof setInterval> | null = null
 const label = computed(() => {
   switch (status.value?.state) {
     case 'ready':
-      return '已加载'
+      return t('asr.ready')
     case 'loading':
-      return '加载中'
+      return t('asr.loading')
     case 'error':
-      return '异常'
+      return t('asr.error')
     default:
-      return '未加载'
+      return t('asr.unloaded')
   }
 })
 
@@ -44,7 +45,7 @@ async function load() {
   busy.value = true
   try {
     status.value = await api.asrLoad()
-    showToast('识别模型已加载')
+    showToast(t('asr.loaded'))
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
   } finally {
@@ -56,7 +57,7 @@ async function unload() {
   busy.value = true
   try {
     status.value = await api.asrUnload()
-    showToast('识别模型已卸载')
+    showToast(t('asr.unloadedToast'))
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
   } finally {
@@ -79,13 +80,13 @@ onBeforeUnmount(() => {
     <div class="asr-row">
       <span class="chip" :class="chipClass">
         <Icon name="mic" :size="12" />
-        识别模型 {{ label }}
+        {{ t('asr.model', { state: label }) }}
       </span>
       <span v-if="status" class="engine">{{ status.engine }} · {{ status.model.split('/').pop() }}</span>
     </div>
     <div class="asr-row">
       <button class="ghost small" type="button" :disabled="busy || status?.state === 'ready'" @click="load">
-        预加载
+        {{ t('asr.preload') }}
       </button>
       <button
         class="ghost small"
@@ -93,9 +94,9 @@ onBeforeUnmount(() => {
         :disabled="busy || status?.state === 'unloaded'"
         @click="unload"
       >
-        立即卸载
+        {{ t('asr.unload') }}
       </button>
-      <span v-if="status" class="hint">空闲 {{ status.idle_unload_min }} 分钟后自动释放</span>
+      <span v-if="status" class="hint">{{ t('asr.idleHint', { n: status.idle_unload_min }) }}</span>
     </div>
   </div>
 </template>

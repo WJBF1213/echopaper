@@ -6,6 +6,12 @@ python-multipart>=0.0.9
 jsonschema>=4.22
 spacy>=3.7
 
-# macOS (Apple Silicon) only: in-process ASR engines
+# Cross-platform ASR (CTranslate2): CUDA on Windows/Linux, CPU everywhere else.
+# This is the default engine outside Apple Silicon.
+faster-whisper>=1.1
+# faster-whisper 1.2 passes metadata_errors to av.open; av 16 removed it.
+av>=11,<16
+
+# macOS (Apple Silicon) only: in-process MLX ASR engines
 mlx-whisper>=0.4 ; sys_platform == "darwin"
 parakeet-mlx>=0.4 ; sys_platform == "darwin"

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app import i18n
+
 router = APIRouter()
 
 _JOB_COLUMNS = (
@@ -71,7 +73,7 @@ def get_batch(batch_id: str, request: Request):
         (batch_id,),
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="批次不存在")
+        raise HTTPException(status_code=404, detail=i18n.t("common.batch_not_found"))
     jobs = [
         {
             "job_id": j["id"],

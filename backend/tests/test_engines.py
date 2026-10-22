@@ -1,11 +1,27 @@
-"""Task B9 tests: dual ASR engine manager + adapter mappings (spec §7)."""
+"""Task B9 tests: ASR engine manager + adapter mappings (spec §7)."""
 import asyncio
+import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.services import engines
 from app.services.engines import EngineError, EngineManager
+
+
+@pytest.fixture(autouse=True)
+def all_engines(request, monkeypatch):
+    """Manager tests exercise the dual-MLX lifecycle on every platform.
+
+    Availability tests that assert real platform detection opt out with
+    ``@pytest.mark.real_platform``.
+    """
+    if request.node.get_closest_marker("real_platform"):
+        return
+    monkeypatch.setattr(engines, "available_engines", lambda *a, **k: engines.ENGINE_NAMES)
 
 
 class FakeEngine:
@@ -222,6 +238,50 @@ def test_whisper_result_mapping():
     assert all(0.0 <= w["p"] <= 1.0 for w in words)
 
 
+def test_faster_whisper_result_mapping():
+    from app.services.faster_whisper_engine import result_to_words
+
+    segments = [
+        SimpleNamespace(words=[
+            SimpleNamespace(word=" Hello", start=0.0, end=0.3,
+                            probability=0.98),
+            SimpleNamespace(word=" there", start=0.3, end=0.6,
+                            probability=0.91),
+        ]),
+        SimpleNamespace(words=[
+            SimpleNamespace(word=" world", start=0.7, end=1.0,
+                            probability=0.85),
+        ]),
+    ]
+    words = result_to_words(segments)
+    assert words == [
+        {"w": "Hello", "s": 0.0, "e": 0.3, "p": 0.98},
+        {"w": "there", "s": 0.3, "e": 0.6, "p": 0.91},
+        {"w": "world", "s": 0.7, "e": 1.0, "p": 0.85},
+    ]
+
+
+def test_faster_whisper_result_mapping_edge_cases():
+    """Generators, missing word lists, blank words and absent probability."""
+    from app.services.faster_whisper_engine import result_to_words
+
+    segments = (
+        SimpleNamespace(words=[
+            SimpleNamespace(word="   ", start=0.0, end=0.1, probability=0.5),
+            SimpleNamespace(word="ok", start=0.1, end=0.2),  # no probability
+        ]),
+        SimpleNamespace(words=None),
+        SimpleNamespace(),  # no words attribute at all
+    )
+    assert result_to_words(segments) == [
+        {"w": "ok", "s": 0.1, "e": 0.2},
+    ]
+
+    from app.services.faster_whisper_engine import FasterWhisperEngine
+
+    assert FasterWhisperEngine.name == "faster_whisper"
+
+
 def test_engines_module_importable_without_mlx():
     # importing the manager must never pull MLX (Windows CI constraint)
     import sys
@@ -229,3 +289,114 @@ def test_engines_module_importable_without_mlx():
     assert "mlx_whisper" not in sys.modules
     assert "parakeet_mlx" not in sys.modules
     assert hasattr(engines, "manager")
+
+
+def test_importing_engines_stays_lazy_for_faster_whisper():
+    """Import isolation cannot be proven in-process once other tests have
+    imported the adapter, so run a clean interpreter."""
+    backend_dir = Path(__file__).resolve().parents[1]
+    code = (
+        "import sys\n"
+        "import app.services.engines as engines\n"
+        "assert hasattr(engines, 'manager')\n"
+        "assert 'faster_whisper' not in sys.modules\n"
+        "assert 'app.services.faster_whisper_engine' not in sys.modules\n"
+        "assert 'ctranslate2' not in sys.modules\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(backend_dir) + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(backend_dir),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.real_platform
+def test_available_engines_apple_silicon():
+    assert engines.available_engines("darwin", "arm64") == engines.ENGINE_NAMES
+    assert engines.default_engine("darwin", "arm64") == "parakeet"
+
+
+@pytest.mark.real_platform
+def test_available_engines_other_platforms():
+    # Intel Macs and every non-darwin platform only get CTranslate2.
+    for platform_name, machine in (
+        ("darwin", "x86_64"),
+        ("win32", "AMD64"),
+        ("linux", "x86_64"),
+    ):
+        assert engines.available_engines(platform_name, machine) == (
+            engines.FALLBACK_ENGINE,
+        )
+        assert engines.default_engine(platform_name, machine) == (
+            engines.FALLBACK_ENGINE
+        )
+
+
+@pytest.mark.asyncio
+async def test_unavailable_engine_falls_back(monkeypatch):
+    monkeypatch.setattr(
+        engines, "available_engines", lambda *a, **k: (engines.FALLBACK_ENGINE,)
+    )
+    monkeypatch.setattr(
+        engines, "default_engine", lambda *a, **k: engines.FALLBACK_ENGINE
+    )
+    mgr, events, _ = make_manager()
+    # A copied Mac .env still names parakeet.
+    mgr._engine_name = None
+    mgr._settings_fn = lambda: {
+        "engine": "parakeet",
+        "parakeet_model": "p-model",
+        "faster_whisper_model": "fw-model",
+        "idle_unload_min": 10,
+    }
+    eng = await mgr.acquire()
+    assert eng.engine_name == engines.FALLBACK_ENGINE
+    assert events[-1] == ("load", engines.FALLBACK_ENGINE, "fw-model")
+    detail = mgr.status().get("detail") or ""
+    # The warning must survive a successful fallback-engine load.
+    assert "不支持" in detail
+    assert "parakeet" in detail and engines.FALLBACK_ENGINE in detail
+    await mgr.release()
+    await mgr.unload_now()
+
+
+@pytest.mark.asyncio
+async def test_switch_to_unavailable_engine_rejected(monkeypatch):
+    monkeypatch.setattr(
+        engines, "available_engines", lambda *a, **k: (engines.FALLBACK_ENGINE,)
+    )
+    mgr, _, _ = make_manager()
+    with pytest.raises(EngineError):
+        await mgr.switch("parakeet")
+
+
+@pytest.mark.asyncio
+async def test_explicit_switch_clears_fallback_detail(monkeypatch):
+    monkeypatch.setattr(
+        engines, "available_engines", lambda *a, **k: (engines.FALLBACK_ENGINE,)
+    )
+    monkeypatch.setattr(
+        engines, "default_engine", lambda *a, **k: engines.FALLBACK_ENGINE
+    )
+    mgr, _, _ = make_manager()
+    mgr._settings_fn = lambda: {
+        "engine": "whisper",
+        "faster_whisper_model": "fw-model",
+        "idle_unload_min": 0,
+    }
+    await mgr.acquire()
+    with pytest.raises(EngineError):
+        await mgr.switch("whisper")
+    # The manager still advertises the fallback, but an explicit request
+    # for an unavailable engine must not silently change the selection.
+    assert mgr.status()["engine"] == engines.FALLBACK_ENGINE
+    assert mgr.status().get("detail")
+    await mgr.release()
+    await mgr.unload_now()
+    await mgr.switch(engines.FALLBACK_ENGINE)
+    assert "detail" not in mgr.status()

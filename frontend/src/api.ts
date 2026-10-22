@@ -1,4 +1,5 @@
 /** Typed client for the FastAPI contract (design spec §8). */
+import { locale, t } from './i18n'
 
 export class ApiError extends Error {
   status: number
@@ -14,12 +15,19 @@ export class ApiError extends Error {
 
 const BASE = '/api'
 
+function withLocale(init?: RequestInit): RequestInit {
+  // Backend messages (job stages, validation errors) follow this header.
+  const headers = new Headers(init?.headers)
+  headers.set('Accept-Language', locale.value === 'zh' ? 'zh-CN' : locale.value)
+  return { ...init, headers }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
-    res = await fetch(`${BASE}${path}`, init)
+    res = await fetch(`${BASE}${path}`, withLocale(init))
   } catch (err) {
-    throw new ApiError(0, `无法连接后端服务：${err instanceof Error ? err.message : String(err)}`)
+    throw new ApiError(0, t('api.offline', { error: err instanceof Error ? err.message : String(err) }))
   }
   const contentType = res.headers.get('content-type') || ''
   const payload: unknown = contentType.includes('application/json')
@@ -31,7 +39,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         ? String((payload as { detail: unknown }).detail)
         : typeof payload === 'string' && payload
           ? payload
-          : `请求失败（HTTP ${res.status}）`
+          : t('api.httpError', { status: res.status })
     throw new ApiError(res.status, detail)
   }
   return payload as T
@@ -74,7 +82,10 @@ export interface AsrSettings {
   engine: string
   parakeet_model: string
   whisper_model: string
+  faster_whisper_model: string
   idle_unload_min: number
+  available_engines: string[]
+  default_engine: string
 }
 
 export interface GenSettings {
@@ -273,6 +284,77 @@ export interface Stats {
   avg_score: number | null
 }
 
+/* ------------------------------------------------------- full paper (exam) */
+
+export interface ExamEvidence {
+  i0: number
+  i1: number
+  quote: string
+  t_start: number
+  t_end: number
+}
+
+export interface ExamItem {
+  number: number
+  type: string
+  stem: string
+  answer: string
+  options: string[]
+  evidence: ExamEvidence[]
+  word_limit: string | null
+  label: string
+  alternatives: string[]
+  group_title: string
+}
+
+export interface ExamGroup {
+  type: string
+  title: string
+  instruction: string
+  /** Shared option pool for matching; empty for other types. */
+  options: string[]
+  items: ExamItem[]
+}
+
+export interface ExamPresetInfo {
+  key: string
+  part: number
+  label: string
+  total_items: number
+  groups: { type: string; count: number }[]
+}
+
+/** The leaner echo returned next to a generated paper. */
+export interface ExamPresetRef {
+  key: string
+  label: string
+}
+
+export interface ExamTypeInfo {
+  key: string
+  label: string
+  parts: number[]
+  answer_kind: 'span' | 'option' | 'option_multi' | 'matching' | string
+  needs_visual: boolean
+  word_limit: string | null
+  instruction: string
+}
+
+export interface ExamTypes {
+  types: ExamTypeInfo[]
+  presets: ExamPresetInfo[]
+}
+
+export interface ExamPaper {
+  material_id: string
+  part: number
+  preset: string
+  total_items: number
+  warnings: string[]
+  available_presets: ExamPresetRef[]
+  groups: ExamGroup[]
+}
+
 export interface CreateMaterialInput {
   name: string
   audioFile?: File | null
@@ -314,7 +396,7 @@ export const api = {
     request<MaterialListItem[]>(`/materials${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   createMaterial: (input: CreateMaterialInput) => {
     const form = new FormData()
-    form.append('name', input.name || '未命名材料')
+    form.append('name', input.name || t('common.untitledMaterial'))
     form.append('mode', input.mode)
     form.append('blank_count', String(input.blankCount))
     if (input.transcript) form.append('transcript', input.transcript)
@@ -390,4 +472,11 @@ export const api = {
 
   translate: (text: string) =>
     request<{ text: string; error?: string }>('/translate', jsonInit('POST', { text })),
+
+  examTypes: () => request<ExamTypes>('/exam/types'),
+  generateExam: (materialId: string, part: number, preset?: string) =>
+    request<ExamPaper>(
+      `/materials/${materialId}/exam`,
+      jsonInit('POST', { part, preset: preset || null }),
+    ),
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { MaterialListItem } from '../api'
 import { fmtDateTime } from '../lib/time'
+import { t, tn } from '../i18n'
 import Icon from './Icon.vue'
 
 defineProps<{ material: MaterialListItem }>()
@@ -12,16 +13,16 @@ const emit = defineEmits<{ open: []; remove: [] }>()
     <div class="mat-body">
       <div class="name">{{ material.name }}</div>
       <div class="meta">
-        <span>{{ material.sets_count }} 套题</span>
+        <span>{{ tn('common.sets', material.sets_count, { n: material.sets_count }) }}</span>
         <span class="dot" aria-hidden="true">·</span>
-        <span>{{ material.has_audio ? '含音频' : '语音朗读' }}</span>
+        <span>{{ material.has_audio ? t('materialCard.hasAudio') : t('materialCard.ttsOnly') }}</span>
         <template v-if="material.duration_s">
           <span class="dot" aria-hidden="true">·</span>
-          <span>{{ Math.round(material.duration_s / 60) }} 分钟</span>
+          <span>{{ tn('common.minutes', Math.round(material.duration_s / 60), { n: Math.round(material.duration_s / 60) }) }}</span>
         </template>
         <template v-if="material.best_score != null">
           <span class="dot" aria-hidden="true">·</span>
-          <span class="score">最好 {{ Math.round(material.best_score * 100) }}%</span>
+          <span class="score">{{ t('materialCard.best', { pct: Math.round(material.best_score * 100) }) }}</span>
         </template>
         <template v-if="material.last_practice">
           <span class="dot" aria-hidden="true">·</span>
@@ -34,8 +35,8 @@ const emit = defineEmits<{ open: []; remove: [] }>()
       <button
         class="icon-btn"
         type="button"
-        title="删除材料"
-        aria-label="删除材料"
+        :title="t('materialCard.delete')"
+        :aria-label="t('materialCard.delete')"
         @click.stop="emit('remove')"
       >
         <Icon name="trash" :size="15" />

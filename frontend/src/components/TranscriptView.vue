@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import type { Word } from '../api'
 import { activeWordIndex, fmtTime } from '../lib/time'
+import { t } from '../i18n'
 
 const props = withDefaults(
   defineProps<{
@@ -49,14 +50,14 @@ function wordAt(wordIndex: number): Word | undefined {
 
 <template>
   <div ref="root" class="transcript" :class="{ timed }">
-    <p v-if="!ranges.length">{{ text || '（无转写）' }}</p>
+    <p v-if="!ranges.length">{{ text || t('transcript.empty') }}</p>
     <template v-else>
       <p v-for="(range, sentenceIndex) in ranges" :key="sentenceIndex" class="sent">
         <button
           v-if="showTime"
           class="sent-time"
           type="button"
-          :title="`从 ${fmtTime(timeOf(range[0]))} 播放本句`"
+          :title="t('transcript.playFrom', { time: fmtTime(timeOf(range[0])) })"
           @click.stop="emit('seekSentence', sentenceIndex)"
         >{{ fmtTime(timeOf(range[0])) }}</button>
         <template v-for="wi in range[1] - range[0] + 1" :key="wi">
@@ -65,7 +66,7 @@ function wordAt(wordIndex: number): Word | undefined {
               class="word"
               :class="{ active: timed && range[0] + wi - 1 === active, clickable: timed }"
               :data-word-index="range[0] + wi - 1"
-              :title="timed ? `${fmtTime(timeOf(range[0] + wi - 1))} 起播放` : undefined"
+              :title="timed ? t('transcript.playFromWord', { time: fmtTime(timeOf(range[0] + wi - 1)) }) : undefined"
               @click="timed && emit('seekWord', range[0] + wi - 1)"
             >{{ wordAt(range[0] + wi - 1)?.w }}</span>{{ wi < range[1] - range[0] + 1 ? ' ' : '' }}
           </template>

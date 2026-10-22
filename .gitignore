@@ -1,10 +1,35 @@
+# Runtime data: SQLite database, audio files, incoming uploads
 /data/
 data/audio/
+
+# Copyrighted IELTS audio used for local testing — never commit
+test_sound/
+
+# Model caches and virtual environments
 .models/
 .venv/
+.asr-venv/
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Node
 node_modules/
 frontend/node_modules/
+
+# Logs and local environment overrides
+*.log
 .env
+.env.local
+.env.*.local
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

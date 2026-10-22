@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { Job } from '../api'
+import { t } from '../i18n'
 import Icon from './Icon.vue'
 
 const props = defineProps<{ job: Job | null }>()
@@ -8,19 +9,19 @@ const props = defineProps<{ job: Job | null }>()
 const stageLabel = computed(() => {
   switch (props.job?.state) {
     case 'queued':
-      return '排队'
+      return t('job.queued')
     case 'downloading':
-      return '下载音频'
+      return t('job.downloading')
     case 'transcribing':
-      return '语音识别'
+      return t('job.transcribing')
     case 'generating':
-      return '生成题目'
+      return t('job.generating')
     case 'done':
-      return '完成'
+      return t('job.done')
     case 'error':
-      return '失败'
+      return t('job.error')
     default:
-      return '准备'
+      return t('job.preparing')
   }
 })
 
@@ -40,7 +41,7 @@ const percent = computed(() => {
         />
         {{ stageLabel }}
       </span>
-      <span class="hint">{{ job.message || '正在处理…' }}</span>
+      <span class="hint">{{ job.message || t('job.working') }}</span>
       <span class="pct">{{ Math.round(percent) }}%</span>
     </div>
     <div class="progress" style="margin-top: 8px">

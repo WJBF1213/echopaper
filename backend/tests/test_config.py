@@ -5,8 +5,10 @@ import os
 def _clear_env(monkeypatch):
     for key in (
         "PORT", "DATA_DIR", "HF_HOME", "HF_ENDPOINT", "PIP_INDEX_URL",
-        "ASR_ENGINE", "PARAKEET_MODEL", "WHISPER_MODEL", "ASR_IDLE_UNLOAD_MIN",
+        "ASR_ENGINE", "PARAKEET_MODEL", "WHISPER_MODEL",
+        "FASTER_WHISPER_MODEL", "ASR_IDLE_UNLOAD_MIN",
         "ASR_PARAKEET_MODEL", "ASR_WHISPER_MODEL",
+        "ASR_FASTER_WHISPER_MODEL",
         "LLM_PROVIDER", "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY",
         "LLM_MAX_CONTEXT_TOKENS", "GEN_BLANK_COUNT",
     ):
@@ -16,14 +18,17 @@ def _clear_env(monkeypatch):
 def test_load_settings_defaults(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     from app import config
+    from app.services import engines
 
     s = config.load_settings(env_file=tmp_path / "nope.env")
     assert s.port == 8300
     assert s.hf_endpoint == "https://hf-mirror.com"
     assert s.pip_index_url == "https://pypi.tuna.tsinghua.edu.cn/simple"
-    assert s.asr.engine == "parakeet"
+    # Apple Silicon defaults to parakeet; every other platform to faster-whisper.
+    assert s.asr.engine == engines.default_engine()
     assert s.asr.parakeet_model == "mlx-community/parakeet-tdt-0.6b-v3"
     assert s.asr.whisper_model == "mlx-community/whisper-large-v3-turbo"
+    assert s.asr.faster_whisper_model == "large-v3-turbo"
     assert s.asr.idle_unload_min == 10
     assert s.llm.provider == "zhipu"
     assert s.llm.base_url == "https://open.bigmodel.cn/api/paas/v4"
@@ -56,6 +61,32 @@ def test_load_settings_env_overrides_and_injection(tmp_path, monkeypatch):
     # injected into os.environ so lazy engine imports pick them up
     assert os.environ.get("HF_ENDPOINT") == "https://test-hf.example.com"
     assert os.environ.get("HF_HOME")
+
+
+def test_default_engine_follows_platform(monkeypatch):
+    from app.services import engines
+
+    monkeypatch.setattr(
+        engines, "default_engine", lambda *a, **k: engines.FALLBACK_ENGINE
+    )
+    from app.config import AsrSettings
+
+    assert AsrSettings().engine == engines.FALLBACK_ENGINE
+    # A deliberately chosen non-default engine is not overridden.
+    assert AsrSettings(engine="whisper").engine == "whisper"
+
+    monkeypatch.setattr(engines, "default_engine", lambda *a, **k: "parakeet")
+    assert AsrSettings().engine == "parakeet"
+
+
+def test_faster_whisper_model_env_override(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text("FASTER_WHISPER_MODEL=small.en\n", encoding="utf-8")
+    from app import config
+
+    s = config.load_settings(env_file=env_file)
+    assert s.asr.faster_whisper_model == "small.en"
 
 
 def test_load_settings_process_env_beats_dotenv(tmp_path, monkeypatch):

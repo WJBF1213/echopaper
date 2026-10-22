@@ -13,6 +13,7 @@ import {
   sentenceTimeRange,
   transcriptSourceLabel,
 } from '../lib/time'
+import { t, tn } from '../i18n'
 import Icon from '../components/Icon.vue'
 import TranscriptView from '../components/TranscriptView.vue'
 
@@ -54,11 +55,11 @@ function seekToSentence(sentenceIndex: number) {
   if (times) seek(times.a, true)
 }
 
-const modes = [
-  { value: 'llm', label: '混合出题' },
-  { value: 'nouns', label: '本地规则' },
-  { value: 'manual', label: '手动标注' },
-]
+const modes = computed(() => [
+  { value: 'llm', label: t('mode.llm') },
+  { value: 'nouns', label: t('mode.nouns') },
+  { value: 'manual', label: t('mode.manual') },
+])
 const newMode = ref('llm')
 
 async function load() {
@@ -99,12 +100,12 @@ async function createSet() {
     const created = await api.getSet(set_id)
     if (created.blank_count < blankCount.value) {
       showToast(
-        `只生成了 ${created.blank_count} 题：材料中可考的位置不足（空距、答案类型与拼写规则限制）`,
+        t('material.sets.fewer', { n: created.blank_count }),
         'info',
         7000,
       )
     } else {
-      showToast('题集已生成')
+      showToast(t('material.sets.created'))
     }
     await load()
     void router.push(`/practice/${set_id}`)
@@ -116,11 +117,11 @@ async function createSet() {
 }
 
 async function removeSet(id: string) {
-  if (!window.confirm('删除这套题？已保存的成绩会保留。')) return
+  if (!window.confirm(t('material.sets.deleteConfirm'))) return
   try {
     await api.deleteSet(id)
     await load()
-    showToast('题集已删除')
+    showToast(t('material.sets.deleted'))
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
   }
@@ -132,7 +133,7 @@ async function saveTranscript() {
   try {
     const res = await api.updateTranscript(material.value.id, transcriptDraft.value)
     if (res.message) showToast(res.message, 'error', 8000)
-    else showToast('转写已更新，旧题集已标记为过期')
+    else showToast(t('material.transcript.saved'))
     editing.value = false
     await load()
   } catch (err) {
@@ -151,22 +152,22 @@ onMounted(load)
       <div class="head-main">
         <button class="back" type="button" @click="router.push('/')">
           <Icon name="arrowLeft" :size="14" />
-          材料库
+          {{ t('material.back') }}
         </button>
-        <h1>{{ material?.name || '材料' }}</h1>
+        <h1>{{ material?.name || t('material.title') }}</h1>
       </div>
       <div v-if="material" class="head-meta">
         <span>{{ transcriptSourceLabel(material.transcript_source) }}</span>
         <span class="dot" aria-hidden="true">·</span>
-        <span>{{ material.words.length }} 词</span>
+        <span>{{ tn('common.words', material.words.length, { n: material.words.length }) }}</span>
         <template v-if="material.duration_s">
           <span class="dot" aria-hidden="true">·</span>
-          <span>{{ Math.round(material.duration_s / 60) }} 分钟</span>
+          <span>{{ tn('common.minutes', Math.round(material.duration_s / 60), { n: Math.round(material.duration_s / 60) }) }}</span>
         </template>
       </div>
     </header>
 
-    <div v-if="loading" class="card empty-tip">加载中…</div>
+    <div v-if="loading" class="card empty-tip">{{ t('common.loading') }}</div>
 
     <template v-else-if="material">
       <section v-if="material.has_audio" class="card">
@@ -180,7 +181,7 @@ onMounted(load)
           <div class="row">
             <button class="big" type="button" @click="toggle">
               <Icon :name="playing ? 'pause' : 'play'" :size="14" />
-              {{ playing ? '暂停' : '播放' }}
+              {{ playing ? t('material.pause') : t('material.play') }}
             </button>
             <button class="ghost small" type="button" @click="nudge(-5)">
               <Icon name="rewind" :size="13" />
@@ -200,7 +201,7 @@ onMounted(load)
           max="1000"
           step="1"
           :value="duration ? Math.round((playTime / duration) * 1000) : 0"
-          aria-label="音频进度"
+          :aria-label="t('material.seek')"
           @input="
             seek(((($event.target as HTMLInputElement).valueAsNumber || 0) / 1000) * (duration || 0))
           "
@@ -209,7 +210,7 @@ onMounted(load)
 
       <section class="card">
         <div class="cardtitle">
-          <h2>题集</h2>
+          <h2>{{ t('material.sets.title') }}</h2>
         </div>
 
         <div v-if="material.sets.length" class="sets">
@@ -217,21 +218,21 @@ onMounted(load)
             <div class="set-main">
               <div class="set-title">
                 {{ modeLabel(s.mode) }}
-                <span v-if="s.stale" class="chip warn">转写已更新</span>
+                <span v-if="s.stale" class="chip warn">{{ t('material.sets.stale') }}</span>
               </div>
               <div class="set-meta">
-                <span>{{ s.blank_count }} 题</span>
+                <span>{{ tn('common.questions', s.blank_count, { n: s.blank_count }) }}</span>
                 <span class="dot" aria-hidden="true">·</span>
                 <span>{{ fmtDateTime(s.created_at) }}</span>
               </div>
             </div>
             <div class="row">
-              <button type="button" @click="router.push(`/practice/${s.id}`)">开始练习</button>
+              <button type="button" @click="router.push(`/practice/${s.id}`)">{{ t('material.sets.start') }}</button>
               <button
                 class="icon-btn"
                 type="button"
-                title="删除题集"
-                aria-label="删除题集"
+                :title="t('material.sets.delete')"
+                :aria-label="t('material.sets.delete')"
                 @click="removeSet(s.id)"
               >
                 <Icon name="trash" :size="14" />
@@ -239,22 +240,26 @@ onMounted(load)
             </div>
           </article>
         </div>
-        <div v-else class="empty-tip">还没有题集</div>
+        <div v-else class="empty-tip">{{ t('material.sets.empty') }}</div>
 
         <div class="gen-form">
           <label class="field">
-            <span class="tag">出题方式</span>
+            <span class="tag">{{ t('material.generate.mode') }}</span>
             <select v-model="newMode">
               <option v-for="m in modes" :key="m.value" :value="m.value">{{ m.label }}</option>
             </select>
           </label>
           <label class="field">
-            <span class="tag">题数</span>
+            <span class="tag">{{ t('material.generate.count') }}</span>
             <input v-model.number="blankCount" type="number" min="1" max="40" />
           </label>
           <button class="big" type="button" :disabled="generating" @click="createSet">
             <Icon name="spark" :size="14" />
-            {{ generating ? '生成中…' : '生成新题集' }}
+            {{ generating ? t('material.generate.creating') : t('material.generate.create') }}
+          </button>
+          <button class="ghost" type="button" @click="router.push(`/paper/${material.id}`)">
+            <Icon name="book" :size="14" />
+            {{ t('paper.open') }}
           </button>
         </div>
 
@@ -262,35 +267,35 @@ onMounted(load)
           v-if="newMode === 'manual'"
           v-model="manualText"
           class="manual-input"
-          placeholder="可选：粘贴带 [方括号] 的原文覆盖材料转写。"
+          :placeholder="t('material.manual.placeholder')"
         />
       </section>
 
       <section class="card">
         <div class="cardtitle">
-          <h2>转写原文</h2>
+          <h2>{{ t('material.transcript.title') }}</h2>
           <div class="row">
             <button
               v-if="!editing && timed"
               class="ghost small"
               type="button"
               :class="{ on: showStamps }"
-              :title="showStamps ? '隐藏每句时间戳' : '显示每句时间戳'"
+              :title="showStamps ? t('material.transcript.hideStampsTitle') : t('material.transcript.showStampsTitle')"
               @click="showStamps = !showStamps"
             >
               <Icon name="clock" :size="13" />
-              {{ showStamps ? '隐藏时间戳' : '显示时间戳' }}
+              {{ showStamps ? t('material.transcript.hideStamps') : t('material.transcript.showStamps') }}
             </button>
             <button v-if="!editing" class="ghost small" type="button" @click="editing = true; transcriptDraft = material.transcript">
               <Icon name="edit" :size="13" />
-              编辑
+              {{ t('material.transcript.edit') }}
             </button>
             <template v-else>
               <button class="ghost small" type="button" :disabled="savingTranscript" @click="editing = false">
-                取消
+                {{ t('common.cancel') }}
               </button>
               <button class="small" type="button" :disabled="savingTranscript" @click="saveTranscript">
-                {{ savingTranscript ? '保存中…' : '保存并重新对齐' }}
+                {{ savingTranscript ? t('common.saving') : t('material.transcript.saveAlign') }}
               </button>
             </template>
           </div>
@@ -308,32 +313,30 @@ onMounted(load)
           @seek-sentence="seekToSentence"
         />
         <p class="hint" style="margin-top: 10px">
-          <template v-if="timed">
-            每句前的时刻可点击，从该句开头播放；点击任意单词可从该词播放，播放中的词会高亮。
-          </template>
-          <template v-else>纯文本没有词级时间戳，无法按词定位播放。</template>
-          音频与原文同时提供时，原文为准，识别结果只提供词级时间戳。修改转写会重新对齐，并把旧题集标记为过期。
+          <template v-if="timed">{{ t('material.transcript.hintTimed') }}</template>
+          <template v-else>{{ t('material.transcript.hintPlain') }}</template>
+          {{ t('material.transcript.hintAlign') }}
         </p>
       </section>
 
       <section class="card">
-        <h2>练习记录</h2>
-        <div v-if="!attempts.length" class="empty-tip">还没有练习记录</div>
+        <h2>{{ t('material.attempts.title') }}</h2>
+        <div v-if="!attempts.length" class="empty-tip">{{ t('material.attempts.empty') }}</div>
         <table v-else class="data">
           <thead>
             <tr>
-              <th>时间</th>
-              <th>模式</th>
-              <th>成绩</th>
-              <th>用时</th>
+              <th>{{ t('material.attempts.time') }}</th>
+              <th>{{ t('material.attempts.mode') }}</th>
+              <th>{{ t('material.attempts.score') }}</th>
+              <th>{{ t('material.attempts.duration') }}</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="a in attempts" :key="a.id">
               <td>{{ fmtDateTime(a.finished_at || a.started_at) }}</td>
               <td>{{ modeLabel(a.mode) }}</td>
-              <td>{{ a.ok }}/{{ a.total }}（{{ pct(a.ok, a.total) }}%）</td>
-              <td>{{ a.duration_s ? `${Math.round(a.duration_s)} 秒` : '—' }}</td>
+              <td>{{ t('material.attempts.scoreValue', { ok: a.ok, total: a.total, pct: pct(a.ok, a.total) }) }}</td>
+              <td>{{ a.duration_s ? t('common.seconds', { n: Math.round(a.duration_s) }) : t('common.none') }}</td>
             </tr>
           </tbody>
         </table>

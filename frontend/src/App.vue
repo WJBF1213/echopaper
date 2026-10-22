@@ -3,19 +3,24 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { toast } from './router'
 import { useTheme } from './theme'
+import { LOCALE_LABELS, SUPPORTED_LOCALES, locale, setLocale, t, type Locale } from './i18n'
 import Icon from './components/Icon.vue'
 
 const route = useRoute()
 const { theme, toggle } = useTheme()
 
-const nav = [
-  { to: '/', label: '材料库', name: 'library' },
-  { to: '/review', label: '回顾', name: 'review' },
-  { to: '/settings', label: '设置', name: 'settings' },
-]
+const nav = computed(() => [
+  { to: '/', label: t('app.nav.library'), name: 'library' },
+  { to: '/review', label: t('app.nav.review'), name: 'review' },
+  { to: '/settings', label: t('app.nav.settings'), name: 'settings' },
+])
 
 const routeName = computed(() => String(route.name || 'library'))
 const isActive = (name: string) => routeName.value === name
+
+function onLocaleChange(event: Event) {
+  setLocale((event.target as HTMLSelectElement).value as Locale)
+}
 </script>
 
 <template>
@@ -24,10 +29,10 @@ const isActive = (name: string) => routeName.value === name
       <div class="masthead-inner">
         <RouterLink to="/" class="brand">
           <Icon name="headphones" :size="17" />
-          <span>雅思听力挖空</span>
+          <span>{{ t('app.brand') }}</span>
         </RouterLink>
 
-        <nav class="links" aria-label="主导航">
+        <nav class="links" :aria-label="t('app.nav.label')">
           <RouterLink
             v-for="item in nav"
             :key="item.to"
@@ -39,11 +44,23 @@ const isActive = (name: string) => routeName.value === name
           </RouterLink>
         </nav>
 
+        <select
+          class="locale-select"
+          :value="locale"
+          :aria-label="t('settings.language')"
+          :title="t('settings.language')"
+          @change="onLocaleChange"
+        >
+          <option v-for="code in SUPPORTED_LOCALES" :key="code" :value="code">
+            {{ LOCALE_LABELS[code] }}
+          </option>
+        </select>
+
         <button
           class="theme-toggle"
           type="button"
-          :aria-label="theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'"
-          :title="theme === 'dark' ? '亮色模式' : '暗色模式'"
+          :aria-label="theme === 'dark' ? t('app.theme.toLight') : t('app.theme.toDark')"
+          :title="theme === 'dark' ? t('app.theme.light') : t('app.theme.dark')"
           @click="toggle"
         >
           <Icon :name="theme === 'dark' ? 'sun' : 'moon'" :size="15" />
@@ -135,6 +152,22 @@ const isActive = (name: string) => routeName.value === name
   border-radius: 3px;
   background: transparent;
   color: var(--ink-3);
+}
+
+.locale-select {
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.locale-select:hover,
+.locale-select:focus {
+  border-color: var(--rule);
+  background: var(--paper-2);
+  color: var(--ink);
 }
 
 .theme-toggle:hover:not(:disabled) {

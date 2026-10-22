@@ -34,7 +34,10 @@ const settings = {
     engine: 'parakeet',
     parakeet_model: 'mlx-community/parakeet-tdt-0.6b-v3',
     whisper_model: 'mlx-community/whisper-large-v3-turbo',
+    faster_whisper_model: 'large-v3-turbo',
     idle_unload_min: 10,
+    available_engines: ['parakeet', 'whisper', 'faster_whisper'],
+    default_engine: 'parakeet',
   },
   gen: { blank_count: 10 },
 }

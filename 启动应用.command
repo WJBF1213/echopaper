@@ -49,6 +49,7 @@ HF_ENDPOINT=https://hf-mirror.com
 ASR_ENGINE=parakeet
 ASR_PARAKEET_MODEL=mlx-community/parakeet-tdt-0.6b-v3
 ASR_WHISPER_MODEL=mlx-community/whisper-large-v3-turbo
+ASR_FASTER_WHISPER_MODEL=large-v3-turbo
 # 空闲多少分钟自动卸载识别模型释放内存（0=常驻）
 ASR_IDLE_UNLOAD_MIN=10
 EOF

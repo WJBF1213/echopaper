@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app import i18n
+
 from app import db
 from app.schemas import AttemptIn, DictationIn
 from app.services.grading import grade
@@ -25,7 +27,7 @@ def submit_attempt(set_id: str, body: AttemptIn, request: Request):
         "SELECT * FROM question_sets WHERE id=?", (set_id,)
     ).fetchone()
     if set_row is None:
-        raise HTTPException(status_code=404, detail="题集不存在")
+        raise HTTPException(status_code=404, detail=i18n.t("common.set_not_found"))
     blanks = {
         b["id"]: b
         for b in conn.execute(
@@ -97,7 +99,7 @@ def submit_dictation(material_id: str, body: DictationIn, request: Request):
         "SELECT * FROM materials WHERE id=?", (material_id,)
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="材料不存在")
+        raise HTTPException(status_code=404, detail=i18n.t("common.material_not_found"))
     words = json.loads(row["words_json"] or "[]")
     results = []
     ok_count = 0

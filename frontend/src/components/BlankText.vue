@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { Blank, Word } from '../api'
 import { activeWordIndex, fmtTime } from '../lib/time'
+import { t } from '../i18n'
 import Icon from './Icon.vue'
 
 const props = defineProps<{
@@ -117,7 +118,7 @@ function widthFor(blank: Blank): string {
           v-if="showTime"
           class="sent-time"
           type="button"
-          :title="`从 ${fmtTime(token.time ?? 0)} 播放本句`"
+          :title="t('transcript.playFrom', { time: fmtTime(token.time ?? 0) })"
           @click.stop="onSentenceClick(token)"
         >{{ fmtTime(token.time ?? 0) }}</button>
       </template>
@@ -128,8 +129,8 @@ function widthFor(blank: Blank): string {
             :style="{ width: widthFor(token.blank) }"
             autocomplete="off"
             spellcheck="false"
-            :aria-label="`第 ${token.blank.position} 题，${token.blank.word_limit}`"
-            :title="`第 ${token.blank.position} 题 · ${token.blank.word_limit}`"
+            :aria-label="t('blank.aria', { n: token.blank.position, limit: token.blank.word_limit })"
+            :title="t('blank.title', { n: token.blank.position, limit: token.blank.word_limit })"
             @input="emit('answer', token.blank.id, ($event.target as HTMLInputElement).value)"
             @focus="emit('focusBlank', token.blank)"
             @click.stop="emit('jump', token.blank)"
@@ -149,7 +150,7 @@ function widthFor(blank: Blank): string {
           class="word"
           :class="{ active: isActive(token), clickable: timed }"
           :data-word-index="token.wordIndex"
-          :title="timed ? `${fmtTime(token.time ?? 0)} 起播放` : undefined"
+          :title="timed ? t('transcript.playFromWord', { time: fmtTime(token.time ?? 0) }) : undefined"
           @click="onWordClick(token)"
         >{{ token.text }}</span><template v-if="token.breakAfter"><span class="end-dot">.</span><br /></template><template v-else>{{ ' ' }}</template>
       </template>

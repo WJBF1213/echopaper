@@ -24,6 +24,7 @@ import {
   sentenceTimeRange,
   transcriptSourceLabel,
 } from '../lib/time'
+import { t } from '../i18n'
 import PlayerBar from '../components/PlayerBar.vue'
 import BlankText from '../components/BlankText.vue'
 import Icon from '../components/Icon.vue'
@@ -180,7 +181,7 @@ async function checkAll() {
       states[item.blank_id] = item.correct ? 'ok' : 'bad'
     }
     lastResult.value = { ok: result.ok, total: result.total }
-    if (result.total === 0) showToast('没有可批改的作答', 'error')
+    if (result.total === 0) showToast(t('practice.noAnswers'), 'error')
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
   } finally {
@@ -194,7 +195,7 @@ async function checkDictation() {
     .filter((d) => (dictationInputs[d.wordIndex] || '').trim())
     .map((d) => ({ word_index: d.wordIndex, text: dictationInputs[d.wordIndex] }))
   if (!items.length) {
-    showToast('先填写至少一个空再批改', 'error')
+    showToast(t('practice.needDictationInput'), 'error')
     return
   }
   try {
@@ -214,13 +215,13 @@ function revealAll() {
     if (!(answers[b.id] || '').trim()) answers[b.id] = b.answer
     if (!states[b.id]) states[b.id] = 'bad'
   }
-  showToast('已显示全部答案')
+  showToast(t('practice.revealed'))
 }
 
 function retryWrong() {
   const wrong = blankList.value.filter((b) => states[b.id] === 'bad')
   if (!wrong.length) {
-    showToast('没有错题')
+    showToast(t('practice.retryNone'))
     return
   }
   for (const b of wrong) {
@@ -229,11 +230,11 @@ function retryWrong() {
   }
   reveal.value = false
   lastResult.value = null
-  showToast(`已清空 ${wrong.length} 个错题，重新作答`)
+  showToast(t('practice.retryCleared', { n: wrong.length }))
 }
 
 function resetAll() {
-  if (!window.confirm('清空全部作答并重做？')) return
+  if (!window.confirm(t('practice.resetConfirm'))) return
   draft.clear()
   for (const key of Object.keys(states)) delete states[key]
   for (const key of Object.keys(dictationInputs)) delete dictationInputs[Number(key)]
@@ -275,7 +276,7 @@ async function toggleTranslations() {
   } finally {
     translating.value = false
   }
-  if (failed) showToast(`${failed} 句翻译失败（需要联网或配置 LLM 密钥）`, 'error')
+  if (failed) showToast(t('practice.translateFailed', { n: failed }), 'error')
 }
 
 function speakAll(slow = false) {
@@ -378,31 +379,31 @@ onBeforeUnmount(() => {
           @click="router.push(material ? `/material/${material.id}` : '/')"
         >
           <Icon name="arrowLeft" :size="14" />
-          返回
+          {{ t('practice.back') }}
         </button>
-        <h1>{{ material?.name || '练习' }}</h1>
+        <h1>{{ material?.name || t('practice.title') }}</h1>
         <span v-if="set" class="chip">{{ modeName }}</span>
         <span v-if="material" class="chip">{{ sourceName }}</span>
-        <span v-if="set?.stale" class="chip warn">基于旧转写</span>
+        <span v-if="set?.stale" class="chip warn">{{ t('practice.stale') }}</span>
       </div>
 
       <div class="head-stats">
         <span class="stat">
-          <span class="stat-label">正确</span>
+          <span class="stat-label">{{ t('practice.stat.correct') }}</span>
           <b>{{ okCount }}</b>
         </span>
         <span class="stat">
-          <span class="stat-label">错误</span>
+          <span class="stat-label">{{ t('practice.stat.wrong') }}</span>
           <b class="bad">{{ badCount }}</b>
         </span>
         <span class="stat">
-          <span class="stat-label">已填</span>
+          <span class="stat-label">{{ t('practice.stat.filled') }}</span>
           <b>{{ filledCount }}<span class="total">/{{ blankList.length }}</span></b>
         </span>
       </div>
     </header>
 
-    <div v-if="loading" class="card empty-tip">加载中…</div>
+    <div v-if="loading" class="card empty-tip">{{ t('common.loading') }}</div>
     <div v-else-if="error" class="card">
       <div class="result bad">{{ error }}</div>
     </div>
@@ -436,24 +437,27 @@ onBeforeUnmount(() => {
         <div v-else class="row">
           <button class="big" type="button" @click="speakAll(false)">
             <Icon name="volume" :size="14" />
-            朗读原文
+            {{ t('practice.readTranscript') }}
           </button>
-          <button class="ghost" type="button" @click="speakAll(true)">慢速</button>
-          <span class="hint">此材料无音频，使用浏览器语音朗读。</span>
+          <button class="ghost" type="button" @click="speakAll(true)">{{ t('practice.slow') }}</button>
+          <span class="hint">{{ t('practice.ttsHint') }}</span>
         </div>
 
         <p class="hint player-hint">
           <template v-if="hasAudio">
-            点击题号可跳到该词前 1.5 秒并循环整句。<kbd>空格</kbd> 播放/暂停，<kbd>←</kbd>
-            <kbd>→</kbd> 前后 5 秒，<kbd>回车</kbd> 批改。
+            {{ t('practice.hint.timed') }}
+            <kbd>{{ t('library.key.space') }}</kbd> {{ t('practice.hint.space') }},
+            <kbd>{{ t('library.key.left') }}</kbd> <kbd>{{ t('library.key.right') }}</kbd>
+            {{ t('practice.hint.arrows') }},
+            <kbd>{{ t('library.key.enter') }}</kbd> {{ t('practice.hint.enter') }}.
           </template>
-          <template v-else>此材料没有词级时间戳，题号不跳转。</template>
+          <template v-else>{{ t('practice.hint.untimed') }}</template>
         </p>
       </section>
 
       <section class="card">
         <div class="cardtitle">
-          <h2>{{ dictation ? '全篇听写' : '题目' }}</h2>
+          <h2>{{ dictation ? t('practice.dictation') : t('practice.questions') }}</h2>
           <div class="row">
             <button
               class="ghost small"
@@ -462,7 +466,7 @@ onBeforeUnmount(() => {
               @click="dictation = !dictation"
             >
               <Icon name="headphonesOff" :size="13" />
-              {{ dictation ? '退出听写' : '全篇听写' }}
+              {{ dictation ? t('practice.exitDictation') : t('practice.dictation') }}
             </button>
             <button
               class="ghost small"
@@ -472,7 +476,7 @@ onBeforeUnmount(() => {
               @click="toggleTranslations"
             >
               <Icon name="translate" :size="13" />
-              {{ translating ? '翻译中…' : '逐句翻译' }}
+              {{ translating ? t('practice.translating') : t('practice.translate') }}
             </button>
           </div>
         </div>
@@ -483,8 +487,9 @@ onBeforeUnmount(() => {
               Questions {{ blankList[0]?.position }}–{{ blankList[blankList.length - 1]?.position }}
             </span>
             <p>
-              Complete the notes below. Write
-              <strong>{{ wordLimitLabel }}</strong> for each answer.
+              {{ t('practice.instruction.before') }}
+              <strong>{{ wordLimitLabel }}</strong>
+              {{ t('practice.instruction.after') }}
             </p>
           </div>
 
@@ -506,7 +511,7 @@ onBeforeUnmount(() => {
           <div v-if="showCn" class="cn-list">
             <p v-for="(range, index) in sentences" :key="index" class="cn">
               <span class="cn-tag">{{ index + 1 }}</span>
-              {{ translations[index] || (translating ? '翻译中…' : '—') }}
+              {{ translations[index] || (translating ? t('practice.translating') : t('common.none')) }}
             </p>
           </div>
         </template>
@@ -519,7 +524,7 @@ onBeforeUnmount(() => {
                   v-if="timed"
                   class="sent-time"
                   type="button"
-                  :title="`从 ${fmtTime(words[range[0]]?.s ?? 0)} 播放本句`"
+                  :title="t('transcript.playFrom', { time: fmtTime(words[range[0]]?.s ?? 0) })"
                   @click.stop="seekToSentence(sentIndex)"
                 >{{ fmtTime(words[range[0]]?.s ?? 0) }}</button>
                 <span class="sent-index">{{ sentIndex + 1 }}</span>
@@ -552,7 +557,7 @@ onBeforeUnmount(() => {
               </div>
               <p v-if="showCn" class="cn">
                 <span class="cn-tag">{{ sentIndex + 1 }}</span>
-                {{ translations[sentIndex] || (translating ? '翻译中…' : '—') }}
+                {{ translations[sentIndex] || (translating ? t('practice.translating') : t('common.none')) }}
               </p>
             </section>
           </div>
@@ -561,9 +566,11 @@ onBeforeUnmount(() => {
             class="result"
             :class="dictationResult.ok === dictationResult.total ? 'good' : 'meh'"
           >
-            听写正确率 {{ pct(dictationResult.ok, dictationResult.total) }}%（{{
-              dictationResult.ok
-            }}/{{ dictationResult.total }}）
+            {{ t('practice.dictation.score', {
+              pct: pct(dictationResult.ok, dictationResult.total),
+              ok: dictationResult.ok,
+              total: dictationResult.total,
+            }) }}
           </div>
         </template>
       </section>
@@ -577,19 +584,19 @@ onBeforeUnmount(() => {
             @click="dictation ? checkDictation() : checkAll()"
           >
             <Icon name="check" :size="14" />
-            {{ grading ? '批改中…' : '批改' }}
+            {{ grading ? t('practice.checking') : t('practice.check') }}
           </button>
           <button class="ghost" type="button" @click="revealAll">
             <Icon name="eye" :size="14" />
-            显示答案
+            {{ t('practice.reveal') }}
           </button>
           <button v-if="!dictation" class="ghost" type="button" @click="retryWrong">
             <Icon name="refresh" :size="14" />
-            重做错题
+            {{ t('practice.retryWrong') }}
           </button>
           <button class="ghost" type="button" @click="resetAll">
             <Icon name="trash" :size="14" />
-            清空
+            {{ t('practice.reset') }}
           </button>
         </div>
 
@@ -599,12 +606,14 @@ onBeforeUnmount(() => {
           :class="lastResult.ok === lastResult.total ? 'good' : 'meh'"
         >
           <template v-if="lastResult.ok === lastResult.total">
-            全部正确（{{ lastResult.ok }}/{{ lastResult.total }}）。
+            {{ t('practice.result.allCorrect', { ok: lastResult.ok, total: lastResult.total }) }}
           </template>
           <template v-else>
-            正确 {{ lastResult.ok }}/{{ lastResult.total }}（{{
-              pct(lastResult.ok, lastResult.total)
-            }}%）。标红的题可直接改，或点「重做错题」。
+            {{ t('practice.result.partial', {
+              ok: lastResult.ok,
+              total: lastResult.total,
+              pct: pct(lastResult.ok, lastResult.total),
+            }) }}
           </template>
         </div>
       </section>

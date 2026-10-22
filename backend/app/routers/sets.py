@@ -5,6 +5,8 @@ import json
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app import i18n
+
 from app import db
 from app.schemas import SetCreateIn
 from app.services import question_gen
@@ -20,7 +22,7 @@ def _material_words(conn, material_id: str):
         "SELECT * FROM materials WHERE id=?", (material_id,)
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="材料不存在")
+        raise HTTPException(status_code=404, detail=i18n.t("common.material_not_found"))
     return row, json.loads(row["words_json"] or "[]"), json.loads(
         row["sentences_json"] or "[]"
     )
@@ -31,7 +33,7 @@ async def create_set(material_id: str, body: SetCreateIn, request: Request):
     conn = request.app.state.conn
     row, words, sents = _material_words(conn, material_id)
     if not words:
-        raise HTTPException(status_code=400, detail="材料没有词表，无法生成题集")
+        raise HTTPException(status_code=400, detail=i18n.t("common.material_no_words"))
 
     if body.mode == "manual":
         text = body.transcript_override or row["transcript"]
@@ -53,7 +55,7 @@ async def create_set(material_id: str, body: SetCreateIn, request: Request):
             raise HTTPException(status_code=400, detail=str(exc))
         blanks = generated.blanks
     else:
-        raise HTTPException(status_code=400, detail=f"未知模式：{body.mode}")
+        raise HTTPException(status_code=400, detail=i18n.t("common.unknown_mode", mode=body.mode))
 
     set_id = persist_set(conn, material_id, body.mode, blanks)
     return {"set_id": set_id}
@@ -66,7 +68,7 @@ def get_set(set_id: str, request: Request):
         "SELECT * FROM question_sets WHERE id=?", (set_id,)
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="题集不存在")
+        raise HTTPException(status_code=404, detail=i18n.t("common.set_not_found"))
     blanks = conn.execute(
         "SELECT * FROM blanks WHERE set_id=? ORDER BY position", (set_id,)
     ).fetchall()
@@ -102,7 +104,7 @@ def delete_set(set_id: str, request: Request):
         "SELECT id FROM question_sets WHERE id=?", (set_id,)
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="题集不存在")
+        raise HTTPException(status_code=404, detail=i18n.t("common.set_not_found"))
     with db._write_lock:
         with conn:
             conn.execute("DELETE FROM question_sets WHERE id=?", (set_id,))

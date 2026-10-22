@@ -530,12 +530,46 @@ def test_settings_test_llm_without_any_key(client, monkeypatch):
     assert "API key" in body["message"]
 
 
-def test_settings_engine_switch_triggers_manager(app, client):
+def test_settings_engine_switch_triggers_manager(app, client, monkeypatch):
+    from app.services import engines as engines_mod
+
+    # Pretend this host can run every engine (Apple Silicon behaviour).
+    monkeypatch.setattr(
+        engines_mod, "available_engines", lambda *a, **k: engines_mod.ENGINE_NAMES
+    )
     r = client.put("/api/settings", json={"asr": {"engine": "whisper"}})
     assert r.status_code == 200
     assert app.state.test_engine.switched == ["whisper"]
     g = client.get("/api/settings").json()
     assert g["asr"]["engine"] == "whisper"
+
+
+def test_settings_rejects_unavailable_engine(app, client, monkeypatch):
+    from app.services import engines as engines_mod
+
+    monkeypatch.setattr(
+        engines_mod,
+        "available_engines",
+        lambda *a, **k: (engines_mod.FALLBACK_ENGINE,),
+    )
+    default_engine = client.get("/api/settings").json()["asr"]["engine"]
+    r = client.put("/api/settings", json={"asr": {"engine": "parakeet"}})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "parakeet" in detail and engines_mod.FALLBACK_ENGINE in detail
+    # Nothing was persisted or switched.
+    assert app.state.test_engine.switched == []
+    assert client.get("/api/settings").json()["asr"]["engine"] == default_engine
+
+
+def test_settings_asr_payload_platform_fields(client):
+    from app.services import engines as engines_mod
+
+    asr = client.get("/api/settings").json()["asr"]
+    assert asr["faster_whisper_model"]
+    assert tuple(asr["available_engines"]) == engines_mod.available_engines()
+    assert asr["default_engine"] == engines_mod.default_engine()
+    assert asr["engine"] in asr["available_engines"]
 
 
 def test_asr_status_and_unload(client):

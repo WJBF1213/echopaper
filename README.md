@@ -1,105 +1,356 @@
-# 雅思听力挖空练习 · 后端服务（macOS 版）
+# IELTS Listening Cloze
 
-上传英语听力音频 → 本地语音识别（词级时间戳）→ 混合出题（LLM 选空 + 代码锚定校验）→ 浏览器听音填空。全量记忆落盘（SQLite + 音频文件），支持材料/题目/成绩/错词回顾。
+English | [中文](README.zh-CN.md)
 
-> **前端已交付**：`frontend/`（Vue 3 + Vite + TypeScript，构建产物 `frontend/dist` 已入库，Mac 免 Node）。后端检测到 `frontend/dist` 即自动托管；实现细节见 `docs/superpowers/specs/2026-10-21-前端实现说明.md`，出题方案调研见 `docs/superpowers/specs/2026-10-21-挖空出题方案调研.md`。
-
-## 系统要求（仅此三项）
-
-| 依赖 | 说明 |
-|---|---|
-| Apple Silicon Mac（M1/M2/M3/M4） | 识别引擎基于 MLX/Metal；Intel 与 Windows 仅能运行 API 与测试，不能本地识别 |
-| Python 3.10+ | `brew install python@3.12` |
-| ffmpeg | `brew install ffmpeg`（识别引擎解码音频需要） |
-
-## 启动（双击即可）
-
-双击 **`启动应用.command`**。首次运行自动完成：创建 `.venv` → 清华镜像安装依赖（macOS 会多装 mlx-whisper 与 parakeet-mlx）→ 安装 spaCy 英文小模型（失败仅降级选词，不影响使用）→ 写入默认 `.env` → 启动服务并打开浏览器 <http://127.0.0.1:8300>。
-
-双击 **`停止应用.command`** 结束进程——识别模型与全部内存立即释放。
-
-## 核心机制
-
-- **双识别引擎（平等可切换）**：`parakeet-mlx`（NVIDIA Parakeet TDT，快约一个量级、英语 WER 更优）与 `mlx-whisper`（whisper-large-v3-turbo）都随 venv 安装；设置页 `PUT /api/settings` 随时切换，切换立即卸载当前引擎。首次转写时经 `HF_ENDPOINT=https://hf-mirror.com` 下载模型（~1.2-1.6GB，缓存 `.models/`，之后离线可用）。
-- **按需加载 / 空闲卸载**：引擎对象仅在首个转写任务时加载（秒级）；空闲 `ASR_IDLE_UNLOAD_MIN`（默认 10 分钟，0=常驻）自动 `del + gc` 释放约 1.2-2GB；`POST /api/asr/unload` 可手动立即卸载。转写与切换/卸载经异步锁串行化。
-- **混合出题**：spaCy 候选池（名词为主）→ LLM 单次调用按词索引选空（默认智谱 GLM-4.7-Flash 免费，支持 dashscope/deepseek/任意 OpenAI 兼容自定义）→ 代码硬校验（答案必须逐字锚定转写、间距≥5词、顺序、非句首）→ 不足时代码补齐。无 API key 时纯程序化名词档。
-  - **LLM 上下文纪律**：单次调用总上下文硬上限 **256k tokens（262144）**，即使模型标称更大也不允许（防超长上下文性能衰减）；超预算按句分块独立调用；**每个听力材料 = 独立无状态会话**，绝不携带跨材料历史。
-- **批量导入**：材料库可一次选多个音频（单批上限 50），逐文件显示转写/出题进度；可选「顺便出题」，失败项可展开完整原因并在批次历史里回看。
-- **记忆与回顾**：材料（音频+转写+词级时间戳）、题集、每次作答、错词本全在 `data/app.db` + `data/audio/`；`GET /api/review/wrong-words` 跨材料聚合错词并带时间戳（点击即可回跳重听）。
-- **批量转写与存储**：材料库「批量转写」可一次多选最多 50 个音频；后端把每个文件流式暂存到 `data/incoming/`，再逐文件排队做 ASR，完成后各自成为独立材料（音频落到 `data/audio/`、词级时间戳与原文写入 SQLite）。默认只转写入库，勾选「转写后顺便出题」才会逐材料生成题集。批次进度逐文件显示，失败互不影响；`GET /api/batches[/{id}]` 可查最近批次与每个文件的阶段。服务重启会把中断中的任务标为失败并清理未入库的暂存文件，避免批次永远停在“识别中”。
-- **原文时间戳与直接回放**：材料详情与练习页的原文按句分行，**每句开头显示句首时间戳**（可隐藏）；点击时间戳从该句开头播放并 AB 循环，点击任意单词从该词播放，播放中的词实时高亮。练习时点题号仍会跳到答案词前 1.5 秒并循环整句；纯文本材料（无词级时间戳）不显示时间戳、不响应点击。
-- **转写对齐**：上传音频同时粘贴官方原文时，原文为题目权威文本、时间戳从 ASR 词映射（difflib 词级对齐，插入词插值）；事后 `PUT /api/materials/{id}/transcript` 可编辑转写并重锚定（旧题集标 stale 保留历史）。
-
-## LLM 配置与排错
-
-设置页的密钥只写不读，保存在本机 `data/app.db`（也可用 `.env` 的 `LLM_API_KEY` 预置）。填好服务商/接口地址/模型/密钥后：
-
-- 点 **保存并测试**：先落库再发一次真实请求。只在输入框敲了 key 但没保存时，后端仍然读不到它——旧版「测试连接」因此会误报“未配置 LLM API key”，现在不会了。
-- 测试失败时显示服务商返回的原始原因（如 `HTTP 401: Authentication Fails …`、`Model Not Exist`），按提示改密钥或模型名即可。
-- 常见原因：模型名不存在（DeepSeek 用 `deepseek-chat` / `deepseek-reasoner`）、接口地址少了或多了 `/v1`、余额不足、代理/网络不通。
-- 不配置 key 也能用：出题自动降级为程序化名词档（`nouns`），只是题目质量不如 LLM 档。
-
-## API 快览（完整契约见设计文档 §8）
+A local-first IELTS listening practice app: upload listening audio, transcribe it
+locally with word-level timestamps, generate cloze (fill-in-the-blank) questions,
+and practise in the browser with synchronized playback.
 
 ```
-GET  /api/health                      健康检查
-GET  /api/asr/status | POST load/unload    引擎状态/手动加载/立即卸载
-GET|PUT /api/settings                 LLM(provider/key/model) 与 ASR 配置（key 只写不读）
-POST /api/settings/test-llm           LLM 连通性测试（可携带表单中尚未保存的配置）
-POST /api/materials                   新建材料（multipart）→ {job_id}
-POST /api/materials/batch             批量导入音频（multipart 字段 audios，可多个）→ {batch_id, jobs[]}
-GET  /api/batches[/{id}]              批次历史 / 批次总进度 + 逐文件状态
-GET  /api/jobs/{id}                   任务进度（queued→downloading→transcribing→generating→done|error）
-GET|DELETE /api/materials[/{id}]      列表/详情/删除；/audio 支持 Range 拖动
-PUT  /api/materials/{id}/transcript   事后编辑转写→重对齐
-POST /api/materials/{id}/sets         生成题集（llm|nouns|manual）
-GET|DELETE /api/sets/{id}             题集详情（含每空 t_start/t_end/word_limit）
-POST /api/sets/{id}/attempts          提交作答→服务端判分存档
-POST /api/materials/{id}/attempts     全篇听写（虚拟题集）判分
-GET  /api/review/wrong-words | /api/stats   错词本 / 总览统计
-POST /api/translate                   逐句中译（gtx→MyMemory→LLM 兜底，库内缓存）
+audio upload ──► local ASR (word timestamps) ──► hybrid question generation ──► browser practice
+                                                  ├─ spaCy candidate pool
+                                                  ├─ LLM picks word spans (optional)
+                                                  └─ code validates verbatim anchors
 ```
 
-## 开发（Windows/macOS 通用）
+The backend is FastAPI; the frontend is a Vue 3 SPA whose build output
+(`frontend/dist/`) is committed and served by the backend. No Node.js is needed
+to run the packaged app.
+
+## Features
+
+- **Three local ASR engines, one interface**
+  - `parakeet` — NVIDIA Parakeet TDT via `parakeet-mlx` (Apple Silicon)
+  - `whisper` — Whisper large-v3-turbo via `mlx-whisper` (Apple Silicon)
+  - `faster_whisper` — CTranslate2 (CUDA on Windows/Linux when available, CPU
+    otherwise); the default outside Apple Silicon
+  All engines produce word-level timestamps. The active model is loaded lazily on
+  the first transcription and unloaded after an idle period (or manually), which
+  frees roughly 1.2–2 GB of memory.
+- **Hybrid question generation.** A spaCy candidate pool proposes nouns, numbers,
+  names, etc.; the LLM selects word-index spans; code enforces the hard rules:
+  answers must be verbatim contiguous transcript spans, at most 3 words, in
+  transcript order, at least 5 words apart, not sentence-initial, and (when the
+  engine reports probabilities) not low-confidence. The code fills any shortfall.
+  Without an LLM key, the app falls back to the purely local `nouns` mode.
+- **LLM context discipline.** One stateless `[system, user]` call per request,
+  never any cross-material history. The total context is hard-capped at 256k
+  tokens (262144); over-budget material is split at sentence boundaries into
+  independent calls.
+- **Batch import.** Select up to 50 audio files at once with per-file progress;
+  failures do not affect the rest. Optionally generate question sets during
+  import, or transcribe now and generate later.
+- **Materials, timestamps, replay.** Materials store audio, transcript, and
+  word-level timing. The transcript displays a timestamp at each sentence start
+  (hideable); click a timestamp to play from that sentence (with A/B looping), or
+  click any word to play from that word with live highlighting.
+- **Transcript alignment.** Paste the official transcript together with audio and
+  the app maps timestamps onto the official words (difflib word alignment,
+  interpolating inserted words). Editing the transcript later re-anchors it and
+  marks old question sets stale instead of deleting history.
+- **Practice and review.** Question sets, per-attempt scoring, full-dictation
+  attempts, a cross-material wrong-word book with timestamps, and overall stats
+  are persisted in SQLite.
+- **Sentence translation.** `POST /api/translate` provides cached English →
+  Chinese sentence translation with gtx → MyMemory → LLM fallbacks.
+- **Bilingual UI.** Chinese and English are built in, with a header language
+  selector, browser-language detection, and per-request `Accept-Language` for
+  backend messages. See [Adding a language](#adding-a-language).
+- **Write-only API keys.** LLM keys are stored in the local SQLite database and
+  never returned by the API (only a masked hint). They can optionally be seeded
+  from `.env`.
+
+## Platform support
+
+Windows and macOS are both supported. Intel Macs and Linux can run the app and
+use the `faster_whisper` CPU fallback for local recognition.
+
+| Platform | Available ASR engines | Notes |
+|---|---|---|
+| macOS on Apple Silicon (M1/M2/M3/M4) | `parakeet` (default), `whisper`, `faster_whisper` | MLX/Metal for parakeet/whisper |
+| Windows 10/11 | `faster_whisper` | CUDA when available, CPU otherwise |
+| Linux | `faster_whisper` | CUDA when available, CPU otherwise |
+| Intel Mac | `faster_whisper` | CPU fallback |
+
+Common requirements:
+
+- **Python 3.10+**
+- **ffmpeg** on `PATH` (audio decoding for all ASR engines)
+- **Node.js 20.19+ (or 22.12+)** only if you develop or rebuild the frontend
+  (Vite 7 requirement); the committed `frontend/dist/` is enough to run the app.
+
+## Quick start
+
+### macOS
+
+Double-click **`启动应用.command`**. On the first run it creates `.venv`,
+installs dependencies (including `mlx-whisper` / `parakeet-mlx`), tries to
+install the spaCy English model, writes a default `.env`, starts the server, and
+opens <http://127.0.0.1:8300>. Double-click **`停止应用.command`** to stop the
+server; all model memory is released immediately.
+
+If macOS blocks the script, right-click it and choose **Open**, or run
+`chmod +x 启动应用.command 停止应用.command` once in Terminal.
+
+### Windows
+
+Double-click **`启动应用.bat`**. The first run creates the virtual environment,
+installs dependencies, sets up the spaCy model, writes a default `.env`, starts
+the server, and opens <http://127.0.0.1:8300>. Double-click **`停止应用.bat`** to
+stop the server and release model memory.
+
+Both launchers install from the Tsinghua PyPI mirror and use the
+`HF_ENDPOINT=https://hf-mirror.com` mirror for model downloads by default. The
+LLM is optional; the app is usable without any API key.
+
+## Manual setup
+
+From the repository root:
 
 ```bash
-python -m venv .venv && .venv/Scripts/pip install -r backend/requirements.txt -r backend/requirements-dev.txt   # macOS 用 .venv/bin/pip
-.venv/Scripts/python -m pytest backend/tests -q        # 145 个测试，全部 mock 引擎/LLM/网络，无需 macOS
-cd backend && ../.venv/Scripts/python -m app.main      # 本机起服务（127.0.0.1:8300）
+python -m venv .venv
 
-cd frontend && npm install && npm test && npm run build   # 57 个 Vitest；产物 dist/ 入库
-cd frontend && npm run dev                             # 前端热更新（:5173，/api 代理到 :8300）
+# macOS / Linux
+source .venv/bin/activate
+# Windows (cmd/PowerShell)
+.venv\Scripts\activate
+
+pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+# Optional: better candidate selection; without it a heuristic word list is used
+python -m spacy download en_core_web_sm
 ```
 
-macOS-only 依赖（mlx-whisper/parakeet-mlx）带 `sys_platform == "darwin"` 环境标记，Windows 开发机自动跳过；引擎模块延迟 import，测试在任意平台可跑。
+Start the backend:
 
-## Mac 验收清单（部署后逐项确认）
+```bash
+cd backend
+python -m app.main
+# -> http://127.0.0.1:8300 (API docs at /docs)
+```
 
-1. 双击 `启动应用.command`：首次建 venv/装依赖（2-5 分钟）→ 浏览器自动打开 `http://127.0.0.1:8300`（或返回 JSON 提示=前端未部署，正常）。
-2. `GET /api/asr/status` 返回 `unloaded`；活动监视器中 Python 进程内存 < 300MB（模型未加载）。
-3. `POST /api/materials`（带 mp3）→ job 进入 `transcribing`：首次可见模型下载进度（终端窗口），此后秒级加载。
-4. 转写完成：`GET /api/materials/{id}` 的 `words` 带词级 `s/e` 时间戳。
-5. 批量导入 2-3 个音频：批次进度逐文件更新；全部完成后材料库出现同名材料；`data/audio/` 数量与材料数一致。
-6. 打开材料详情：原文每句前有 `m:ss` 时间戳，点击单词能从该词播放并高亮；练习页同样可见句首时间戳。
-7. 设置页填好 LLM key 后点「保存并测试」→ 生成 llm 题集：blanks 的 answer 均可在 transcript 中逐字找到；无 key 走 nouns 档。
-8. 转写后空闲 10 分钟：活动监视器确认 Python 内存回落（模型已卸载）；`/api/asr/status` 回到 `unloaded`。
-9. 设置页切引擎 parakeet↔whisper：切换后 status 立即 `unloaded`，下次转写用新引擎。
-10. 重启电脑/重跑启动脚本：材料、题集、成绩、错词本全部还在（`data/` 目录）。
-11. 双击 `停止应用.command`：8300 进程结束，内存全部释放。
+The backend serves `frontend/dist` automatically when it exists. For frontend
+development:
 
-## 旧版本
+```bash
+cd frontend
+npm install
+npm run dev        # http://127.0.0.1:5173, /api proxied to :8300
+npm run build      # vue-tsc --noEmit && vite build -> frontend/dist
+```
 
-`雅思听力挖空练习.html`（单文件版）、`asr_server.py` + `启动本地识别服务.command`（Qwen3-ASR 常驻服务）为 legacy，保留未动；新旧数据不互通。
+Platform notes:
 
-## 目录
+- `mlx-whisper` and `parakeet-mlx` are marked `sys_platform == "darwin"`, so they
+  are skipped on Windows/Linux. Engine modules import their dependencies lazily,
+  so tests and the API work on any platform.
+- On an Intel Mac the MLX packages are unusable. If pip cannot resolve them,
+  install the remaining runtime dependencies explicitly:
+  `pip install fastapi uvicorn httpx python-multipart jsonschema spacy faster-whisper`,
+  then run with the `faster_whisper` engine.
+- Windows: install ffmpeg with `winget install Gyan.FFmpeg` (or from
+  <https://www.gyan.dev/ffmpeg/builds/>) and make sure it is on `PATH`.
+  macOS: `brew install ffmpeg`. Debian/Ubuntu: `sudo apt install ffmpeg`.
+
+## Configuration
+
+Copy `.env.example` to `.env` (the launchers create one on first run). Process
+environment variables take precedence over `.env`. The Settings page persists
+LLM/ASR/generation values in `data/app.db`, and those stored values override the
+file defaults for those sections.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `8300` | HTTP port (always bound to `127.0.0.1`) |
+| `DATA_DIR` | `<repo>/data` | SQLite DB and audio storage |
+| `HF_HOME` | `<repo>/.models` | Hugging Face model cache |
+| `HF_ENDPOINT` | `https://hf-mirror.com` | Model download mirror |
+| `PIP_INDEX_URL` | Tsinghua mirror | Injected for pip subprocesses |
+| `ASR_ENGINE` | `parakeet` on Apple Silicon, `faster_whisper` elsewhere | Active engine |
+| `ASR_PARAKEET_MODEL` | `mlx-community/parakeet-tdt-0.6b-v3` | Parakeet model |
+| `ASR_WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` | MLX Whisper model |
+| `ASR_FASTER_WHISPER_MODEL` | `large-v3-turbo` | CTranslate2 model (alias: `FASTER_WHISPER_MODEL`) |
+| `ASR_IDLE_UNLOAD_MIN` | `10` | Idle minutes before unloading the model (`0` = keep loaded) |
+| `LLM_PROVIDER` | `zhipu` | `zhipu`, `dashscope`, `deepseek`, or `custom` |
+| `LLM_BASE_URL` | provider preset | OpenAI-compatible base URL |
+| `LLM_MODEL` | provider preset | Model name |
+| `LLM_API_KEY` | empty | Optional key seed; the Settings page is the normal path |
+| `LLM_MAX_CONTEXT_TOKENS` | `262144` | May be lowered, never raised above 256k |
+| `GEN_BLANK_COUNT` | `10` | Blank-count setting exposed in the Settings page (requests carry an explicit count) |
+
+A `.env` naming an MLX engine on a non-Apple-Silicon machine is detected at
+runtime and automatically falls back to `faster_whisper` instead of failing every
+job.
+
+### LLM providers
+
+The Settings page offers presets for OpenAI-compatible providers:
+
+| Provider | Base URL | Default model |
+|---|---|---|
+| `zhipu` | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.7-flash` |
+| `dashscope` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-flash` |
+| `deepseek` | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| `custom` | your URL | your model |
+
+Enter the key and click **Save & test**: the key is written first, then a real
+request is sent with the form's current values. The key is write-only — the API
+returns only `has_key` and a masked hint. Leaving the key field blank keeps the
+stored key. Test failures show the provider's raw reason (HTTP 401, model not
+found, etc.).
+
+Common causes of a failed test: a nonexistent model name (for DeepSeek use
+`deepseek-chat` or `deepseek-reasoner`), a base URL with a missing or extra
+`/v1`, insufficient balance, or a proxy/network problem. A key typed but not
+saved is not visible to the backend, so the panel tests the form's current values
+instead of only the stored ones.
+
+Without a key the app still works: question generation uses the local `nouns`
+mode. With a key it uses `llm` mode, which is the higher-quality hybrid pipeline.
+
+## Models and downloads
+
+- Model weights are cached under `HF_HOME` (default `.models/`). Downloads go
+  through `HF_ENDPOINT` (default `hf-mirror.com`); after the first download the
+  app works offline.
+- `parakeet` (`mlx-community/parakeet-tdt-0.6b-v3`) and `whisper`
+  (`mlx-community/whisper-large-v3-turbo`) download roughly 1.2–1.6 GB on first
+  transcription on Apple Silicon.
+- `faster_whisper` uses the CTranslate2 `large-v3-turbo` model — the same Whisper
+  weights as the MLX engine, converted for CTranslate2. It runs in `float16` on
+  CUDA and `int8` on CPU; a missing CUDA runtime falls back to CPU automatically
+  instead of failing the transcription.
+- **Hugging Face unreachable?** `app/services/model_download.py` probes HF first
+  and falls back to the ModelScope mirror of the same CTranslate2 files when
+  `huggingface.co` / `hf-mirror.com` time out. You can also point the model
+  setting at a local directory containing `config.json`, `model.bin`,
+  `tokenizer.json`, and `vocabulary.json` for fully offline use.
+- Switching engines in Settings unloads the current model immediately. Idle
+  unload (`ASR_IDLE_UNLOAD_MIN`, default 10 minutes) frees memory automatically;
+  `POST /api/asr/unload` unloads immediately.
+
+## Adding a language
+
+The frontend uses a small dependency-free i18n layer
+(`frontend/src/i18n/index.ts`) with a reactive `locale` ref, `t()`,
+`localStorage` persistence, and a language selector in the header. The backend
+has its own catalogs in `backend/app/i18n.py` and localizes job/error messages
+from the request's `Accept-Language` (the frontend sends the selected UI locale).
+
+- Short guide: [`CONTRIBUTING.md`](CONTRIBUTING.md#adding-a-ui-language)
+- Detailed step-by-step with code snippets:
+  [`docs/ADDING_A_LANGUAGE.md`](docs/ADDING_A_LANGUAGE.md)
+
+Both test suites assert catalog key parity and non-empty values. LLM prompt
+entries (`question_gen.*`, `translate.*`) are localizable in the backend catalog
+as well.
+
+## API overview
+
+The complete contract lives in the design document (§8) and the interactive docs
+at `/docs`.
 
 ```
-backend/app/          FastAPI 应用（routers/ + services/，services 不依赖 fastapi 便于移植）
-backend/tests/        145 个 pytest（引擎/LLM/网络全 mock）
-frontend/src/         Vue 3 SPA（views/ components/ composables/ lib/）
-frontend/dist/        构建产物（入库，后端静态托管）
-data/                 运行时生成：app.db + audio/
-.models/              HF 模型缓存（hf-mirror 下载）
-启动应用.command / 停止应用.command
-docs/superpowers/     设计文档（§8=前后端契约）、实施计划、前端说明、出题调研
+GET  /api/health                      Health check
+GET  /api/asr/status | POST /api/asr/load | POST /api/asr/unload
+GET|PUT /api/settings                 LLM/ASR/generation settings (key write-only)
+POST /api/settings/test-llm           Probe the LLM with the form's current values
+POST /api/materials                   Create a material (multipart) -> {job_id}
+POST /api/materials/batch             Batch import audio files -> {batch_id, jobs[]}
+GET  /api/batches[/{id}]              Batch history / per-file progress
+GET  /api/jobs/{id}                   Job progress (queued -> transcribing -> generating -> done|error)
+GET  /api/materials[/{id}]            List / detail
+DELETE /api/materials/{id}
+GET  /api/materials/{id}/audio        Audio stream (HTTP Range supported)
+PUT  /api/materials/{id}/transcript   Edit transcript and re-anchor timestamps
+POST /api/materials/{id}/sets         Generate a set (llm | nouns | manual)
+GET|DELETE /api/sets/{id}             Set detail (t_start/t_end/word_limit per blank)
+POST /api/sets/{id}/attempts          Submit and score an attempt
+POST /api/materials/{id}/attempts     Full-dictation attempt
+GET  /api/materials/{id}/attempts     Attempt history for a material
+GET  /api/review/wrong-words          Cross-material wrong-word book
+GET  /api/stats                       Overview statistics
+POST /api/translate                   Sentence EN -> ZH with cache and fallbacks
 ```
+
+## Smoke test checklist
+
+After installation, confirm:
+
+1. The launcher starts the server and opens <http://127.0.0.1:8300>;
+   `GET /api/health` returns `{"ok": true, ...}`.
+2. `GET /api/asr/status` reports `unloaded`; idle memory stays low.
+3. Import an audio file: the job moves through `transcribing` → `generating` →
+   `done` (the first run downloads the model), and the material's `words` carry
+   `s`/`e` timestamps.
+4. Open the material: sentence-start timestamps are shown; clicking a word plays
+   from that word and highlights it.
+5. Batch-import 2–3 files: progress updates per file and one failure does not
+   stop the others.
+6. Save an LLM key and generate an `llm` set: every answer can be found verbatim
+   in the transcript. Without a key, `nouns` mode still works.
+7. Wait for the idle timeout (or use `POST /api/asr/unload`): status returns to
+   `unloaded` and memory drops.
+8. Switch engines in Settings: the current model unloads and the next job uses
+   the new engine.
+9. Restart the app: materials, sets, attempts, and wrong-word records persist in
+   `data/`. Stop the app: the port-8300 process exits and memory is released.
+
+## Testing
+
+```bash
+# Backend: all ASR engines, the LLM, and network access are mocked,
+# so this runs on any OS without model downloads.
+python -m pytest backend/tests -q
+
+# Frontend: Vitest + jsdom
+cd frontend
+npm install
+npm test
+
+# Type-check and build the SPA served by the backend
+npm run build
+```
+
+## Project layout
+
+```
+backend/app/            FastAPI app
+  routers/              HTTP endpoints
+  services/             Domain layer (no FastAPI imports; portable)
+  i18n.py               Backend message + LLM prompt catalogs
+  config.py             .env / environment settings
+backend/tests/          pytest suite (engines/LLM/network mocked)
+frontend/src/           Vue 3 SPA
+  i18n/                 Dependency-free i18n layer and zh/en catalogs
+  views/ components/    UI
+  composables/ lib/     player, polling, helpers
+frontend/dist/          Committed build output, served by the backend
+data/                   Runtime: app.db, audio/, incoming/ (ignored by Git)
+.models/                Hugging Face model cache (ignored by Git)
+docs/                   Design and implementation docs (mostly Chinese)
+docs/ADDING_A_LANGUAGE.md  Step-by-step localization guide
+启动应用.command / 停止应用.command              macOS launchers
+启动应用.bat / 停止应用.bat                      Windows launchers
+LICENSE                 MIT
+SECURITY.md             Vulnerability reporting and key handling
+CONTRIBUTING.md         Setup, conventions, language guide
+README.zh-CN.md         Chinese translation of this README
+```
+
+## Legacy files
+
+The following files are kept for reference and are **not** used by the current
+app. Their data is not compatible with the new backend:
+
+- `雅思听力挖空练习.html` — the original single-file version.
+- `asr_server.py` + `启动本地识别服务.command` / `启动本地识别服务.bat` — a legacy
+  Qwen3-ASR resident service on port 8399.
+
+## License
+
+[MIT](LICENSE) © 2026 IELTS Listening Cloze contributors.
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Please do not
+commit API keys, `data/`, or copyrighted audio (`test_sound/`); see
+[SECURITY.md](SECURITY.md).

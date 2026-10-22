@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { api, type Stats, type WrongWord } from '../api'
 import { showToast } from '../router'
 import { fmtDateTime, pct } from '../lib/time'
+import { t } from '../i18n'
 import Icon from '../components/Icon.vue'
 
 const router = useRouter()
@@ -41,41 +42,41 @@ onMounted(load)
 <template>
   <div>
     <header class="page-head">
-      <h1>回顾</h1>
-      <p class="sub">总体正确率与跨材料错词。点「重听」可回到该词所在的材料。</p>
+      <h1>{{ t('review.title') }}</h1>
+      <p class="sub">{{ t('review.subtitle') }}</p>
     </header>
 
-    <div v-if="loading" class="card empty-tip">加载中…</div>
+    <div v-if="loading" class="card empty-tip">{{ t('common.loading') }}</div>
     <template v-else>
       <section class="summary">
         <div class="figure">
-          <span class="figure-label">材料</span>
+          <span class="figure-label">{{ t('review.stat.materials') }}</span>
           <strong>{{ stats?.materials ?? 0 }}</strong>
         </div>
         <div class="figure">
-          <span class="figure-label">练习次数</span>
+          <span class="figure-label">{{ t('review.stat.attempts') }}</span>
           <strong>{{ stats?.attempts ?? 0 }}</strong>
         </div>
         <div class="figure">
-          <span class="figure-label">平均正确率</span>
+          <span class="figure-label">{{ t('review.stat.average') }}</span>
           <strong>{{ avgLabel }}</strong>
         </div>
         <div class="figure">
-          <span class="figure-label">错词条目</span>
+          <span class="figure-label">{{ t('review.stat.wrong') }}</span>
           <strong>{{ wrongWords.length }}</strong>
         </div>
       </section>
 
       <section class="card">
-        <h2>错词本</h2>
-        <div v-if="!wrongWords.length" class="empty-tip">还没有错词</div>
+        <h2>{{ t('review.wrong.title') }}</h2>
+        <div v-if="!wrongWords.length" class="empty-tip">{{ t('review.wrong.empty') }}</div>
         <div v-else class="scroll-area">
           <table class="data">
             <thead>
               <tr>
-                <th>错词</th>
-                <th>错误次数</th>
-                <th>最近一次</th>
+                <th>{{ t('review.wrong.word') }}</th>
+                <th>{{ t('review.wrong.times') }}</th>
+                <th>{{ t('review.wrong.last') }}</th>
                 <th></th>
               </tr>
             </thead>
@@ -87,7 +88,7 @@ onMounted(load)
                 <td class="action">
                   <button class="ghost small" type="button" @click="openWrong(word)">
                     <Icon name="headphones" :size="13" />
-                    重听
+                    {{ t('review.wrong.relisten') }}
                   </button>
                 </td>
               </tr>

@@ -9,6 +9,7 @@ errors carrying the offending line/ordinal.
 """
 from __future__ import annotations
 
+from app import i18n
 from app.services.grading import normalize_answer
 
 MAX_ANCHOR_SPAN = 6  # words searched when anchoring one bracket answer
@@ -41,14 +42,13 @@ def parse_manual(text: str) -> tuple[str, list[dict]]:
         if ch == "[":
             end = text.find("]", i + 1)
             if end == -1:
-                raise ManualError(f"第 {line} 行：方括号未闭合")
+                raise ManualError(i18n.t("manual.unclosed", line=line))
             answer = text[i + 1 : end].strip()
             if not answer:
-                raise ManualError(f"第 {line} 行：空的方括号 []")
+                raise ManualError(i18n.t("manual.empty", line=line))
             if any(c in answer for c in SPAN_FORBIDDEN):
                 raise ManualError(
-                    f"第 {line} 行：括号内容 “{answer}” 跨越句读标点，"
-                    "请在句子内部标记"
+                    i18n.t("manual.cross_punctuation", line=line, answer=answer)
                 )
             items.append({"answer": answer, "line": line})
             out.append(answer)
@@ -88,8 +88,12 @@ def anchor_manual(items: list[dict], words_json: list[dict]) -> list[dict]:
                     break
         if found is None:
             raise ManualAnchorError(
-                f"第 {ordinal} 个括号（第 {item.get('line', '?')} 行）"
-                f"的答案 “{answer}” 无法在转写中找到逐字匹配"
+                i18n.t(
+                    "manual.not_found",
+                    ordinal=ordinal,
+                    line=item.get("line", "?"),
+                    answer=answer,
+                )
             )
         result.append({"i0": found[0], "i1": found[1], "answer": answer})
     return result

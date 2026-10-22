@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from app import i18n
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 
@@ -29,7 +30,7 @@ def _get_material(conn, material_id: str):
         "SELECT * FROM materials WHERE id=?", (material_id,)
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="材料不存在")
+        raise HTTPException(status_code=404, detail=i18n.t("common.material_not_found"))
     return row
 
 
@@ -59,7 +60,7 @@ def list_materials(request: Request, q: str = ""):
 @router.post("/materials")
 async def create_material(
     request: Request,
-    name: str = Form("未命名材料"),
+    name: str = Form(""),
     audio: UploadFile | None = File(None),
     audio_url: str | None = Form(None),
     transcript: str | None = Form(None),
@@ -68,7 +69,7 @@ async def create_material(
 ):
     if audio is None and not audio_url and not transcript:
         raise HTTPException(
-            status_code=400, detail="需要提供音频文件、音频 URL 或转写文本之一"
+            status_code=400, detail=i18n.t("common.need_input")
         )
     payload: dict = {
         "name": name,
@@ -105,29 +106,29 @@ async def create_materials_batch(
     """
     files = [f for f in (audios or []) if f and f.filename]
     if not files:
-        raise HTTPException(status_code=400, detail="请至少选择一个音频文件")
+        raise HTTPException(status_code=400, detail=i18n.t("common.need_one_audio"))
     if len(files) > MAX_BATCH_FILES:
         raise HTTPException(
             status_code=400,
-            detail=f"单次最多 {MAX_BATCH_FILES} 个音频，请分批导入",
+            detail=i18n.t("common.too_many_files", limit=MAX_BATCH_FILES),
         )
     if generate_sets and mode not in _GENERATE_MODES:
         raise HTTPException(
             status_code=400,
-            detail="批量出题仅支持 llm 或 nouns 模式",
+            detail=i18n.t("common.batch_mode_invalid"),
         )
     for upload in files:
         if not audio_mod.has_supported_ext(upload.filename):
             raise HTTPException(
                 status_code=400,
-                detail=f"不支持的音频格式：{upload.filename}",
+                detail=i18n.t("common.unsupported_audio", name=upload.filename),
             )
 
     data_dir = Path(request.app.state.data_dir)
     batch_id = uuid.uuid4().hex[:12]
     created = _now()
     batch_name = name.strip() or (
-        f"批量导入 {datetime.now().strftime('%m-%d %H:%M')}"
+        i18n.t("common.batch_default_name", time=datetime.now().strftime("%m-%d %H:%M"))
     )
 
     staged: list[Path] = []
@@ -144,7 +145,7 @@ async def create_materials_batch(
         jobs: list[dict] = []
         for position, (upload, path) in enumerate(zip(files, staged)):
             filename = upload.filename or path.name
-            material_name = Path(filename).stem.strip() or "未命名材料"
+            material_name = Path(filename).stem.strip() or i18n.t("common.untitled_material")
             job_id = await request.app.state.jobs_manager.create(
                 {
                     "name": material_name,
@@ -182,7 +183,7 @@ async def create_materials_batch(
                     "DELETE FROM batches WHERE id=?", (batch_id,)
                 )
         raise HTTPException(
-            status_code=400, detail=f"批量导入失败：{exc}"
+            status_code=400, detail=i18n.t("common.batch_failed", error=exc)
         ) from exc
 
     return {"batch_id": batch_id, "name": batch_name, "jobs": jobs}
@@ -239,7 +240,7 @@ def put_transcript(material_id: str, body: TranscriptIn, request: Request):
             source = "aligned"
         else:
             source = row["transcript_source"]
-            message = f"原文对齐失败（匹配率 {rate:.0%}），已保留原词表"
+            message = i18n.t("common.align_failed_keep", rate=rate)
     else:
         words, sents = _pseudo(body.transcript)
         source = "manual"
@@ -300,10 +301,10 @@ def material_audio(material_id: str, request: Request):
     conn = request.app.state.conn
     row = _get_material(conn, material_id)
     if not row["audio_path"]:
-        raise HTTPException(status_code=404, detail="该材料没有音频")
+        raise HTTPException(status_code=404, detail=i18n.t("common.audio_missing"))
     path = Path(row["audio_path"])
     if not path.is_file():
-        raise HTTPException(status_code=404, detail="音频文件缺失")
+        raise HTTPException(status_code=404, detail=i18n.t("common.audio_file_missing"))
     media_type = mimetypes.guess_type(str(path))[0] or "audio/mpeg"
     size = path.stat().st_size
     range_header = request.headers.get("range")
@@ -349,7 +350,7 @@ def _pseudo(text: str):
 def get_job(job_id: str, request: Request):
     job = request.app.state.jobs_manager.get(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise HTTPException(status_code=404, detail=i18n.t("common.job_not_found"))
     return job
 
 

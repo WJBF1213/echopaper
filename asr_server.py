@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Qwen3-ASR 本地识别服务器
-用法: ./.asr-venv/bin/python asr_server.py [端口]
+用法: ./.asr-venv/bin/python asr_server.py [端口]            (macOS/Linux)
+      .asr-venv\\Scripts\\python.exe asr_server.py [端口]   (Windows)
 接口: POST /transcribe  (body = 音频文件原始字节, mp3/wav 均可)
 返回: {"language": "...", "text": "...", "segments": n}
 """
@@ -23,11 +24,31 @@ from qwen_asr import Qwen3ASRModel
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8399
 SR = 16000
 
-print("loading model (MPS)...", flush=True)
+# 设备选择：CUDA（Windows/Linux 有 NVIDIA GPU）优先，其次 Apple MPS，最后 CPU。
+def _mps_available() -> bool:
+    try:
+        return bool(torch.backends.mps.is_available())
+    except Exception:
+        return False
+
+
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+    try:
+        # Ampere 及更新架构支持 bfloat16；更老的卡退回 float16。
+        DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    except Exception:
+        DTYPE = torch.float16
+elif _mps_available():
+    DEVICE, DTYPE = "mps", torch.bfloat16
+else:
+    DEVICE, DTYPE = "cpu", torch.float32
+
+print(f"loading model ({DEVICE})...", flush=True)
 model = Qwen3ASRModel.from_pretrained(
     "Qwen/Qwen3-ASR-1.7B",
-    dtype=torch.bfloat16 if torch.backends.mps.is_available() else torch.float32,
-    device_map="mps" if torch.backends.mps.is_available() else "cpu",
+    dtype=DTYPE,
+    device_map=DEVICE,
     max_inference_batch_size=8,
     max_new_tokens=1024,
 )

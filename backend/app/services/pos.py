@@ -317,6 +317,16 @@ def _is_spelled(text: str, runs: list[dict]) -> bool:
     return False
 
 
+# Public aliases for downstream generators (exam_gen) that need the same
+# fairness rules without rebuilding the detection logic.
+def spelling_runs(words: list[str]) -> tuple[list[dict], set[int]]:
+    """Detect spelled-out names; returns (runs, covered word indices)."""
+    return _spelling_runs(words)
+
+
+def is_spelled(text: str, runs: list[dict]) -> bool:
+    return _is_spelled(text, runs)
+
 _TEMPORAL = frozenset(
     """
     monday tuesday wednesday thursday friday saturday sunday

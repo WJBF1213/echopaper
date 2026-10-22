@@ -19,6 +19,7 @@ const router = createRouter({
     { path: '/', name: 'library', component: () => import('./views/LibraryView.vue') },
     { path: '/practice/:setId', name: 'practice', component: () => import('./views/PracticeView.vue') },
     { path: '/material/:materialId', name: 'material', component: () => import('./views/MaterialView.vue') },
+    { path: '/paper/:materialId', name: 'paper', component: () => import('./views/PaperView.vue') },
     { path: '/review', name: 'review', component: () => import('./views/ReviewView.vue') },
     { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },

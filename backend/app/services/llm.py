@@ -19,6 +19,8 @@ from typing import Any, Mapping
 import httpx
 import jsonschema
 
+from app import i18n
+
 MAX_CONTEXT_TOKENS = 262144  # 256k hard cap (input+output), not exceedable
 MIN_CONTEXT_TOKENS = 4096
 PROMPT_OVERHEAD_TOKENS = 200  # scaffolding around the user payload
@@ -83,9 +85,7 @@ def resolve(cfg: Mapping | Any) -> tuple[str, str, str]:
     model = (_cfg_value(cfg, "model") or preset["model"]).strip()
     api_key = (_cfg_value(cfg, "api_key") or "").strip()
     if not base_url or not model:
-        raise LlmError(
-            f"LLM 配置不完整：provider={provider} 需要 base_url 与 model"
-        )
+        raise LlmError(i18n.t("llm.incomplete", provider=provider))
     return base_url.rstrip("/"), model, api_key
 
 
@@ -142,17 +142,16 @@ async def chat_json(
             content = (choice.get("message") or {}).get("content", "")
             try:
                 if finish not in ("stop", None):
-                    raise LlmError(f"finish_reason={finish}（输出被截断）")
+                    raise LlmError(i18n.t("llm.truncated", reason=finish))
                 obj = _extract_json(content)
                 jsonschema.validate(obj, schema)
                 return obj
             except (ValueError, jsonschema.ValidationError, LlmError) as exc:
                 last_error = str(exc)
-                user_turn = (
-                    f"{user}\n\n上一次返回不符合要求：{last_error}\n"
-                    "请严格返回符合要求的 JSON 对象，不要任何多余文本。"
+                user_turn = i18n.t(
+                    "llm.retry_hint", user=user, error=last_error
                 )
-        raise LlmError(f"LLM 返回不符合要求（已重试一次）：{last_error}")
+        raise LlmError(i18n.t("llm.invalid", error=last_error))
     finally:
         if own_client:
             await client.aclose()
@@ -170,7 +169,7 @@ async def test_connection(
             {"type": "object", "properties": {"ok": {"type": "boolean"}}},
             client=client,
         )
-        return True, "连接正常"
+        return True, i18n.t("llm.probe_ok")
     except httpx.HTTPStatusError as exc:
         # Providers put the actionable reason in the body ("Model Not Exist",
         # "Authentication Fails", ...); the bare status line hides it.

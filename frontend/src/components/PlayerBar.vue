@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { fmtTime } from '../lib/time'
+import { t } from '../i18n'
 import Icon from './Icon.vue'
 
 const props = defineProps<{
@@ -28,8 +29,8 @@ const progress = computed(() => {
 })
 
 const abLabel = computed(() => {
-  if (props.abA == null) return 'AB 循环'
-  if (props.abB == null) return `A ${fmtTime(props.abA)} · 再点设 B`
+  if (props.abA == null) return t('player.ab')
+  if (props.abB == null) return t('player.abWaitingB', { time: fmtTime(props.abA) })
   return `${fmtTime(props.abA)} – ${fmtTime(props.abB)}`
 })
 
@@ -56,22 +57,22 @@ function onRateChange(event: Event) {
         step="1"
         :value="Math.round(progress * 10)"
         :style="{ '--p': `${progress}%` }"
-        aria-label="播放进度"
+        :aria-label="t('player.progress')"
         @input="onSeekInput"
       />
       <span class="time">{{ fmtTime(duration) }}</span>
     </div>
 
     <div class="playbar">
-      <button class="play" type="button" :aria-label="playing ? '暂停' : '播放'" @click="emit('toggle')">
+      <button class="play" type="button" :aria-label="playing ? t('player.pause') : t('player.play')" @click="emit('toggle')">
         <Icon :name="playing ? 'pause' : 'play'" :size="15" />
-        {{ playing ? '暂停' : '播放' }}
+        {{ playing ? t('player.pause') : t('player.play') }}
       </button>
-      <button class="ghost small" type="button" title="后退 5 秒" @click="emit('nudge', -5)">
+      <button class="ghost small" type="button" :title="t('player.back5')" @click="emit('nudge', -5)">
         <Icon name="rewind" :size="14" />
         5s
       </button>
-      <button class="ghost small" type="button" title="前进 5 秒" @click="emit('nudge', 5)">
+      <button class="ghost small" type="button" :title="t('player.forward5')" @click="emit('nudge', 5)">
         5s
         <Icon name="forward" :size="14" />
       </button>
@@ -85,9 +86,9 @@ function onRateChange(event: Event) {
         {{ abLabel }}
       </button>
       <button v-if="abA != null" class="ghost small" type="button" @click="emit('clearAb')">
-        取消
+        {{ t('player.clearAb') }}
       </button>
-      <select class="rate" :value="rate" aria-label="播放速度" @change="onRateChange">
+      <select class="rate" :value="rate" :aria-label="t('player.rate')" @change="onRateChange">
         <option :value="1">1.0×</option>
         <option :value="0.8">0.8×</option>
         <option :value="0.6">0.6×</option>

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from app import db
+from app import db, i18n
 from app.services import align as align_mod
 from app.services import audio as audio_mod
 from app.services import normalize
@@ -220,14 +220,14 @@ class JobManager:
         p.setdefault("staged_path", p.get("audio_path"))
         if p.get("audio_url") and not p.get("audio_path"):
             self._update(job_id, state="downloading", percent=5,
-                         message="下载音频")
+                         message=i18n.t("job.downloading"))
             audio_path, duration = await audio_mod.save_upload(
                 data_dir, url=p["audio_url"]
             )
         elif p.get("audio_path"):
             src = Path(p["audio_path"])
             if not src.is_file():
-                raise FileNotFoundError(f"音频文件不存在：{src}")
+                raise FileNotFoundError(i18n.t("job.audio_not_found", path=src))
             audio_path, duration = await self._adopt_audio(data_dir, src)
         elif p.get("audio_bytes") is not None:
             audio_path, duration = await audio_mod.save_upload(
@@ -240,7 +240,7 @@ class JobManager:
         # -- stage 2: words (ASR / align / manual) ---------------------------------
         if audio_path is not None:
             self._update(job_id, state="transcribing", percent=30,
-                         message="本地识别中")
+                         message=i18n.t("job.transcribing"))
             engine_obj = await self._acquire_engine()
             try:
                 raw_words = await asyncio.to_thread(
@@ -258,15 +258,14 @@ class JobManager:
                     words, sents, source = aligned, off_sents, "aligned"
                 else:
                     words, sents, source = asr_words, asr_sents, "asr"
-                    note = (f"原文对齐失败（匹配率 {rate:.0%}），"
-                            "已改用识别文本")
+                    note = i18n.t("common.align_failed", rate=rate)
             else:
                 words, sents, source = asr_words, asr_sents, "asr"
         elif transcript:
             words, sents = _pseudo_words(transcript)
             source = "manual"
         else:
-            raise ValueError("缺少音频或转写文本，无法创建材料")
+            raise ValueError(i18n.t("job.no_input"))
 
         # -- stage 3: persist material ---------------------------------------------
         material_id = _uid()
@@ -281,7 +280,7 @@ class JobManager:
                     " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         material_id,
-                        p.get("name") or "未命名材料",
+                        p.get("name") or i18n.t("common.untitled_material"),
                         p.get("source_type") or ("url" if p.get("audio_url") else "upload"),
                         audio_rel,
                         p.get("audio_url"),
@@ -302,7 +301,7 @@ class JobManager:
             return
 
         self._update(job_id, state="generating", percent=75,
-                     message="生成题目", material_id=material_id)
+                     message=i18n.t("job.generating"), material_id=material_id)
 
         # -- stage 4: question set --------------------------------------------------
         if mode == "manual":
@@ -359,9 +358,9 @@ def reconcile_interrupted(conn) -> int:
         with conn:
             cur = conn.execute(
                 "UPDATE jobs SET state='error',"
-                " message=COALESCE(message, '服务重启，任务已中断，请重新导入'),"
+                " message=COALESCE(message, ?),"
                 " updated_at=? WHERE state NOT IN ('done','error')",
-                (_now(),),
+                (i18n.t("common.restart_interrupted"), _now()),
             )
     return cur.rowcount
 

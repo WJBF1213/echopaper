@@ -1,4 +1,5 @@
 /** Pure helpers shared by the practice UI and tests. */
+import { locale, translate } from '../i18n'
 
 export function fmtTime(sec: number | null | undefined): string {
   if (sec == null || !Number.isFinite(sec) || sec < 0) return '0:00'
@@ -127,7 +128,7 @@ export function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return '—'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleString('zh-CN', {
+  return d.toLocaleString(locale.value === 'zh' ? 'zh-CN' : 'en-GB', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -137,22 +138,13 @@ export function fmtDateTime(iso: string | null | undefined): string {
 }
 
 export function modeLabel(mode: string): string {
-  return (
-    {
-      llm: '混合出题',
-      nouns: '本地规则',
-      manual: '手动标注',
-      dictation: '全篇听写',
-    } as Record<string, string>
-  )[mode] || mode
+  const key = `mode.${mode}`
+  const label = translate(key)
+  return label === key ? mode : label
 }
 
 export function transcriptSourceLabel(source: string): string {
-  return (
-    {
-      asr: '语音识别',
-      aligned: '原文对齐',
-      manual: '纯文本',
-    } as Record<string, string>
-  )[source] || source
+  const key = `source.${source}`
+  const label = translate(key)
+  return label === key ? source : label
 }

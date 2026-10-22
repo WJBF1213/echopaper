@@ -14,12 +14,13 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app import db
+from app import db, i18n
 from app.config import REPO_ROOT, load_settings
 from app.routers import (
     asr as asr_router,
     attempts as attempts_router,
     batches as batches_router,
+    exam as exam_router,
     health as health_router,
     materials as materials_router,
     review as review_router,
@@ -90,11 +91,23 @@ def create_app(
     translate_svc.configure(conn)
 
     app = FastAPI(
-        title="雅思听力挖空练习",
+        title=i18n.t("app.title"),
         version=VERSION,
         # single-user local app: show docs locally for convenience
         docs_url="/docs",
     )
+
+    @app.middleware("http")
+    async def locale_middleware(request, call_next):
+        """Every user-facing backend message follows Accept-Language."""
+        token = i18n.set_locale(
+            i18n.normalize_locale(request.headers.get("accept-language"))
+        )
+        try:
+            return await call_next(request)
+        finally:
+            i18n.reset_locale(token)
+
     app.state.conn = conn
     app.state.data_dir = data_dir
     app.state.engine_manager = engine_manager
@@ -110,6 +123,8 @@ def create_app(
     app.include_router(attempts_router.router, prefix="/api")
     app.include_router(review_router.router, prefix="/api")
     app.include_router(translate_router.router, prefix="/api")
+    # exploration branch: full typed IELTS papers (generated on demand)
+    app.include_router(exam_router.router, prefix="/api")
 
     # static hosting AFTER api routes (spec: hash router SPA if present)
     if dist_dir.is_dir():
@@ -121,8 +136,7 @@ def create_app(
         @app.get("/")
         def frontend_hint():  # pragma: no cover - trivial
             return {
-                "hint": "前端构建产物不存在（frontend/dist）。后端 API 正常运行："
-                        "/docs、/api/health。前端由外部实现，接口契约见设计文档 §8。",
+                "hint": i18n.t("common.frontend_hint"),
                 "ok": True,
                 "version": VERSION,
             }

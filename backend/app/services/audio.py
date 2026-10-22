@@ -16,6 +16,8 @@ from pathlib import Path
 
 import httpx
 
+from app import i18n
+
 DOWNLOAD_TIMEOUT_S = 120.0
 ALLOWED_EXTS = {".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".aac", ".webm"}
 
@@ -97,7 +99,7 @@ async def save_upload(
         elif url:
             await _download(url, path)
         else:
-            raise AudioError("缺少音频数据（data/url 二选一）")
+            raise AudioError(i18n.t("audio.no_data"))
     except Exception:
         await asyncio.to_thread(path.unlink, True)  # clean partial file
         raise
@@ -113,19 +115,30 @@ async def _download(url: str, path: Path) -> None:
         ) as client:
             async with client.stream("GET", url) as resp:
                 if resp.status_code >= 400:
-                    raise AudioError(f"下载失败：HTTP {resp.status_code}")
+                    raise AudioError(i18n.t("audio.download_http", status=resp.status_code))
                 with path.open("wb") as fh:
                     async for chunk in resp.aiter_bytes(1 << 16):
                         fh.write(chunk)
     except httpx.HTTPError as exc:
-        raise AudioError(f"下载失败：{exc}") from exc
+        raise AudioError(i18n.t("audio.download_failed", error=exc)) from exc
 
 
 def probe_duration(path: str | Path) -> float | None:
-    """ffprobe duration; None when unavailable (never raises)."""
+    """Audio duration in seconds; None when it cannot be determined.
+
+    ffprobe is preferred (accurate for every container). Without it — common
+    on a bare Windows install — PyAV (already required by faster-whisper)
+    reads the container header, so the UI still shows a duration.
+    """
     ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        return None
+    if ffprobe:
+        result = _ffprobe_duration(ffprobe, path)
+        if result is not None:
+            return result
+    return _av_duration(path)
+
+
+def _ffprobe_duration(ffprobe: str, path: str | Path) -> float | None:
     try:
         result = subprocess.run(
             [
@@ -141,3 +154,18 @@ def probe_duration(path: str | Path) -> float | None:
         return float(result.stdout.strip())
     except Exception:
         return None
+
+
+def _av_duration(path: str | Path) -> float | None:
+    try:
+        import av
+
+        with av.open(str(path), mode="r") as container:
+            if container.duration is not None:
+                return float(container.duration / 1_000_000)  # microseconds
+            stream = container.streams.audio[0] if container.streams.audio else None
+            if stream is not None and stream.duration and stream.time_base:
+                return float(stream.duration * stream.time_base)
+    except Exception:
+        return None
+    return None

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { BatchStatus, JobState } from '../api'
+import { t } from '../i18n'
 import Icon from './Icon.vue'
 
 const props = defineProps<{ batch: BatchStatus }>()
@@ -12,9 +13,9 @@ const percent = computed(() =>
 
 const summary = computed(() => {
   const { done, error, running, total } = props.batch
-  const parts = [`${done}/${total} 完成`]
-  if (running) parts.push(`${running} 进行中`)
-  if (error) parts.push(`${error} 失败`)
+  const parts = [t('batch.progress.summary', { done, total })]
+  if (running) parts.push(t('library.batches.running', { n: running }))
+  if (error) parts.push(t('library.batches.failed', { n: error }))
   return parts.join(' · ')
 })
 
@@ -30,17 +31,17 @@ const tone = computed(() => {
 function label(state: JobState): string {
   switch (state) {
     case 'queued':
-      return '排队'
+      return t('batch.progress.stage.queued')
     case 'downloading':
-      return '下载'
+      return t('batch.progress.stage.downloading')
     case 'transcribing':
-      return '识别'
+      return t('batch.progress.stage.transcribing')
     case 'generating':
-      return '出题'
+      return t('batch.progress.stage.generating')
     case 'done':
-      return '完成'
+      return t('batch.progress.stage.done')
     case 'error':
-      return '失败'
+      return t('batch.progress.stage.error')
     default:
       return state
   }
@@ -48,8 +49,11 @@ function label(state: JobState): string {
 
 /** The first clause is usually the actual cause; the rest is remediation. */
 function shortError(message: string | null): string {
-  const text = message || '处理失败'
-  const cut = text.split('；')[0] ?? text
+  const text = message || t('common.failed')
+  // The first clause carries the cause and the last carries remediation.
+  // Split on the clause separator only — an ASCII ":" usually belongs to the
+  // error class prefix ("EngineError: ..."), so cutting there would hide the cause.
+  const cut = text.split(/[；;]/)[0] ?? text
   return cut.length > 56 ? `${cut.slice(0, 55)}…` : cut
 }
 </script>
@@ -57,7 +61,7 @@ function shortError(message: string | null): string {
 <template>
   <section class="card batch" role="status" aria-live="polite">
     <div class="cardtitle">
-      <h2>批量导入 · {{ batch.name }}</h2>
+      <h2>{{ t('batch.progress.title', { name: batch.name }) }}</h2>
       <span class="hint">{{ summary }}</span>
     </div>
     <div class="progress" :class="tone">
@@ -73,11 +77,11 @@ function shortError(message: string | null): string {
           />
           {{ label(job.state) }}
         </span>
-        <span class="fname" :title="job.file_name || ''">{{ job.file_name || '未命名文件' }}</span>
+        <span class="fname" :title="job.file_name || ''">{{ job.file_name || t('common.unnamedFile') }}</span>
         <span v-if="job.state === 'error'" class="err" :title="job.message || ''">
           <details>
             <summary>{{ shortError(job.message) }}</summary>
-            <p>{{ job.message || '处理失败' }}</p>
+            <p>{{ job.message || t('common.failed') }}</p>
           </details>
         </span>
         <span v-else-if="job.state !== 'done'" class="pct-small">
@@ -88,7 +92,7 @@ function shortError(message: string | null): string {
           class="ghost small"
           type="button"
           @click="emit('openMaterial', job.material_id)"
-        >打开材料</button>
+        >{{ t('batch.progress.open') }}</button>
       </div>
     </div>
   </section>
