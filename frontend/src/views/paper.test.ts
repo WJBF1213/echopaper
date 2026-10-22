@@ -349,7 +349,7 @@ describe('PaperView selector', () => {
   beforeEach(() => {
     mocked.getMaterial.mockResolvedValue(material)
     mocked.examTypes.mockResolvedValue(examTypes)
-    mocked.generateExam.mockResolvedValue({ paper: makePaper(), skipped: [] })
+    mocked.generateExam.mockResolvedValue({ paper_id: "p1", paper: makePaper(), skipped: [] })
   })
 
   it('builds blocks from chips in click order, clamping counts to max_count', async () => {
@@ -430,7 +430,7 @@ describe('PaperView results', () => {
   beforeEach(() => {
     mocked.getMaterial.mockResolvedValue(material)
     mocked.examTypes.mockResolvedValue(examTypes)
-    mocked.generateExam.mockResolvedValue({ paper: makePaper(), skipped: [] })
+    mocked.generateExam.mockResolvedValue({ paper_id: "p1", paper: makePaper(), skipped: [] })
   })
 
   it('renders completion items with one input per blank', async () => {
@@ -446,7 +446,7 @@ describe('PaperView results', () => {
   })
 
   it('renders each completion layout with a distinct presenter', async () => {
-    mocked.generateExam.mockResolvedValue({ paper: makeLayoutPaper(), skipped: [] })
+    mocked.generateExam.mockResolvedValue({ paper_id: "p1", paper: makeLayoutPaper(), skipped: [] })
     const wrapper = await mountView()
     await selectType(wrapper, '填空题')
     await generatePaper(wrapper)
@@ -482,7 +482,7 @@ describe('PaperView results', () => {
   })
 
   it('marks partial groups with the produced/requested badge', async () => {
-    mocked.generateExam.mockResolvedValue({ paper: makeLayoutPaper(), skipped: [] })
+    mocked.generateExam.mockResolvedValue({ paper_id: "p1", paper: makeLayoutPaper(), skipped: [] })
     const wrapper = await mountView()
     await selectType(wrapper, '填空题')
     // Request more than the paper produced (6 of 10).
@@ -541,6 +541,7 @@ describe('PaperView results', () => {
 
   it('shows the skipped list with each refusal reason next to the paper', async () => {
     mocked.generateExam.mockResolvedValue({
+      paper_id: 'p1',
       paper: makePaper(),
       skipped: [{ type: 'map_labelling', reason: '转写无空间方位描述' }],
     })
@@ -596,7 +597,7 @@ describe('PaperView map group', () => {
   beforeEach(() => {
     mocked.getMaterial.mockResolvedValue(material)
     mocked.examTypes.mockResolvedValue(examTypes)
-    mocked.generateExam.mockResolvedValue({ paper: makePaper(), skipped: [] })
+    mocked.generateExam.mockResolvedValue({ paper_id: "p1", paper: makePaper(), skipped: [] })
   })
 
   it('renders the scene via MapScene with slot answers wired from item choices', async () => {

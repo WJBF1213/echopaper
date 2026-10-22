@@ -762,15 +762,15 @@ def test_map_block_two_step_generation(tmp_db):
     cafe = find_span(words, "cafe")
     hall = find_span(words, "main hall")
     matching = {"groups": [{"title": "Visitor centre", "items": [
-        {"stem": "What is at blank slot 1?", "answer": "B",
+        {"stem": "What is at blank slot 1?", "answer": "B", "slot": 1,
          "evidence": [{"i0": gift[0], "i1": gift[1], "quote": "gift shop"}]},
-        {"stem": "What is at blank slot 2?", "answer": "C",
+        {"stem": "What is at blank slot 2?", "answer": "C", "slot": 2,
          "evidence": [{"i0": ticket[0], "i1": ticket[1], "quote": "ticket desk"}]},
-        {"stem": "What is at blank slot 3?", "answer": "D",
+        {"stem": "What is at blank slot 3?", "answer": "D", "slot": 3,
          "evidence": [{"i0": cafe[0], "i1": cafe[1], "quote": "cafe"}]},
-        {"stem": "What is at blank slot 4?", "answer": "A",
+        {"stem": "What is at blank slot 4?", "answer": "A", "slot": 4,
          "evidence": [{"i0": entrance[0], "i1": entrance[1], "quote": "entrance"}]},
-        {"stem": "What is at blank slot 5?", "answer": "E",
+        {"stem": "What is at blank slot 5?", "answer": "E", "slot": 5,
          "evidence": [{"i0": hall[0], "i1": hall[1], "quote": "main hall"}]},
     ]}]}
     captured = []
@@ -810,6 +810,68 @@ def test_map_block_two_step_generation(tmp_db):
     assert len(group["items"]) == 5
     assert {it["answer"] for it in group["items"]} == {"A", "B", "C", "D", "E"}
     assert all(it["answer_text"] for it in group["items"])
+    # T13 rider: every map item carries its explicit numbered blank, and
+    # the numbering matches the scene's blank_slot circles one to one.
+    assert sorted(it["slot"] for it in group["items"]) == [1, 2, 3, 4, 5]
+
+
+def test_map_item_slot_validation(tmp_db):
+    """The map validator (matching path) asserts the explicit slot: it
+    must be an int within the scene's 1..N blank numbering, one item per
+    slot. Bad slots are rejected per item, valid siblings survive."""
+    words, ranges = make_material(MAP_TALK * 4)
+    gift = find_span(words, "gift shop")
+    ticket = find_span(words, "ticket desk")
+
+    def run_map(items):
+        matching = {"groups": [{"title": "Visitor centre", "items": items}]}
+        return run(generate_paper(
+            tmp_db, as_material(words, ranges),
+            [{"type": "map_labelling", "count": 2}],
+            {"api_key": "test"}, lang="zh",
+            chat_fn=fake_cached_chat([make_scene(words), matching]),
+        ))
+
+    ok = {"stem": "What is at blank slot 1?", "answer": "B", "slot": 1,
+          "evidence": [{"i0": gift[0], "i1": gift[1], "quote": "gift shop"}]}
+
+    # Missing slot on a map item is a rejection, not a silent pass.
+    result = run_map([
+        ok,
+        {"stem": "What is at blank slot 2?", "answer": "C",
+         "evidence": [{"i0": ticket[0], "i1": ticket[1],
+                       "quote": "ticket desk"}]},
+    ])
+    slots = [it["slot"] for it in result.paper["groups"][0]["items"]]
+    assert slots == [1]
+
+    # Out-of-range slot: the scene numbers blanks 1..5 only.
+    result = run_map([
+        ok,
+        {"stem": "What is at blank slot 9?", "answer": "C", "slot": 9,
+         "evidence": [{"i0": ticket[0], "i1": ticket[1],
+                       "quote": "ticket desk"}]},
+    ])
+    assert [it["slot"] for it in result.paper["groups"][0]["items"]] == [1]
+
+    # Non-integer slot is rejected the same way.
+    result = run_map([
+        ok,
+        {"stem": "What is at blank slot two?", "answer": "C", "slot": "2",
+         "evidence": [{"i0": ticket[0], "i1": ticket[1],
+                       "quote": "ticket desk"}]},
+    ])
+    assert [it["slot"] for it in result.paper["groups"][0]["items"]] == [1]
+
+    # One slot, one item: a duplicate slot leaves the paper with the
+    # first asker only.
+    result = run_map([
+        ok,
+        {"stem": "Which letter for slot 1 again?", "answer": "C", "slot": 1,
+         "evidence": [{"i0": ticket[0], "i1": ticket[1],
+                       "quote": "ticket desk"}]},
+    ])
+    assert [it["slot"] for it in result.paper["groups"][0]["items"]] == [1]
 
 
 def test_map_scene_refusal_skips_block(tmp_db):

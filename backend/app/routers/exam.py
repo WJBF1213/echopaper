@@ -5,9 +5,9 @@ without ``parts`` -- Part is no longer an input (design §4.2).
 ``POST /api/materials/{id}/exam`` generates a whole paper from free
 ``blocks=[{type, count}]`` in user order, with an optional forced
 completion ``layout_hint`` and a ``regenerate`` cache-busting marker
-(design §4.4, §8.3). Nothing is persisted yet: the response carries
-``{paper, skipped}`` and ``paper_id`` arrives with persistence (§5.1,
-later task).
+(design §4.4, §8.3). Since Task 14 every generation persists one
+``papers`` row (spec + paper + usage JSON, design §5.1) and the
+response is ``{paper_id, paper, skipped}``.
 
 Suitability refusals (design §4.5): a partial refusal returns 200 with
 ``skipped: [{type, reason}]`` listing each refused block; when every
@@ -16,12 +16,15 @@ requested block is refused the endpoint answers 400 with
 """
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, HTTPException, Request
 
-from app import i18n
+from app import db, i18n
 from app.schemas import ExamGenerateIn
 from app.services import exam_gen
 from app.services.exam_presets import QUESTION_TYPES
+from app.services.jobs import _now, _uid
 from app.services.llm import LlmError
 from app.routers.settings import effective_settings, llm_cfg_or_none
 
@@ -54,7 +57,7 @@ def list_question_types(request: Request):
 async def generate_exam(
     material_id: str, body: ExamGenerateIn, request: Request
 ):
-    """Generate a blocks-based paper; returns ``{paper, skipped}`` as JSON."""
+    """Generate a blocks-based paper, persist it, answer with its id."""
     conn = request.app.state.conn
     row = conn.execute(
         "SELECT id, words_json, sentences_json FROM materials WHERE id=?",
@@ -69,12 +72,13 @@ async def generate_exam(
     if cfg is None:
         raise HTTPException(status_code=400, detail=i18n.t("llm.no_key"))
 
+    blocks = [{"type": b.type, "count": b.count} for b in body.blocks]
     try:
         result = await exam_gen.generate_paper(
             conn,
             {"id": row["id"], "words_json": row["words_json"],
              "sentences_json": row["sentences_json"]},
-            [{"type": b.type, "count": b.count} for b in body.blocks],
+            blocks,
             cfg,
             lang=i18n.get_locale(),
             layout_hint=body.layout_hint,
@@ -92,4 +96,28 @@ async def generate_exam(
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    return {"paper": result.paper, "skipped": result.skipped}
+    # Persist the generation (§5.1): what was asked (spec), what came
+    # back (paper incl. visual scene), and the per-call usage ledger.
+    paper_id = _uid()
+    with db._write_lock:
+        with conn:
+            conn.execute(
+                "INSERT INTO papers(id, material_id, spec_json, paper_json,"
+                " generation_json, stale, created_at) VALUES(?,?,?,?,?,0,?)",
+                (
+                    paper_id,
+                    material_id,
+                    json.dumps(
+                        {
+                            "blocks": blocks,
+                            "layout_hint": body.layout_hint,
+                            "regenerate": body.regenerate,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(result.paper, ensure_ascii=False),
+                    json.dumps(result.usage, ensure_ascii=False),
+                    _now(),
+                ),
+            )
+    return {"paper_id": paper_id, "paper": result.paper, "skipped": result.skipped}

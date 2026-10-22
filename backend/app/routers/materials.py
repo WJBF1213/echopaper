@@ -220,7 +220,9 @@ def material_detail(material_id: str, request: Request):
 def put_transcript(material_id: str, body: TranscriptIn, request: Request):
     """Post-edit / paste official transcript: re-align + re-anchor (§6.1).
 
-    Existing question sets are marked stale=1 (history kept)."""
+    Existing question sets are marked stale=1 (history kept); every
+    stored paper of the material goes stale too (design §5.2 -- stale
+    papers stay fetchable/answerable, the flag is only a hint)."""
     conn = request.app.state.conn
     row = _get_material(conn, material_id)
     words = json.loads(row["words_json"] or "[]")
@@ -267,6 +269,12 @@ def put_transcript(material_id: str, body: TranscriptIn, request: Request):
             )
             conn.execute(
                 "UPDATE question_sets SET stale=1 WHERE material_id=?",
+                (material_id,),
+            )
+            # Papers are self-contained (answers/evidence embedded) so a
+            # stale paper stays answerable -- only flag the drift (§5.2).
+            conn.execute(
+                "UPDATE papers SET stale=1 WHERE material_id=?",
                 (material_id,),
             )
     return {

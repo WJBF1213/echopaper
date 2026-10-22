@@ -368,9 +368,13 @@ class ExamItem:
     # Text of the keyed option, for matching types. The letter alone is not
     # stable when two chunks carry different option pools.
     answer_text: str = ""
+    # The numbered map blank this item asks about (1-based), for visual
+    # types only (T13 rider): the explicit link between a map item and
+    # its numbered circle on the scene. None on every non-map item.
+    slot: int | None = None
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "number": self.number,
             "type": self.type_key,
             "stem": self.stem,
@@ -384,6 +388,9 @@ class ExamItem:
             "group_title": self.group_title,
             "answer_text": self.answer_text,
         }
+        if self.slot is not None:
+            out["slot"] = self.slot
+        return out
 
 
 @dataclass
@@ -608,6 +615,15 @@ def _schema_hint(qtype: QuestionType) -> str:
             '"label":"...","i0":12,"i1":12,"answer":"...","reason":"..."}]}]}'
         )
     if qtype.answer_kind == "matching":
+        if qtype.generates_visual:
+            # Map items name the numbered blank they ask about (T13
+            # rider): the explicit slot replaces stem-text parsing.
+            return (
+                '{"groups":[{"title":"...","options":["...","..."],'
+                '"items":[{"stem":"... blank slot 1 ...","answer":"A",'
+                '"slot":1,'
+                '"evidence":[{"i0":12,"i1":18,"quote":"..."}],"reason":"..."}]}]}'
+            )
         return (
             '{"groups":[{"title":"...","options":["...","..."],'
             '"items":[{"stem":"...","answer":"A",'
@@ -990,10 +1006,21 @@ def _validate_matching_item(
     words_json: list[dict],
     sentences: list[list[int]],
     qtype: QuestionType,
+    max_slot: int | None = None,
 ) -> tuple[ExamItem | None, str | None]:
     stem = str(raw.get("stem") or "").strip()
     if not stem:
         return None, "缺少题干 stem"
+    # Map items name the numbered blank they ask about explicitly (T13
+    # rider): slot must be an int within the scene's 1..N numbering.
+    slot: int | None = None
+    if qtype.generates_visual:
+        raw_slot = raw.get("slot")
+        if not isinstance(raw_slot, int) or isinstance(raw_slot, bool):
+            return None, f"地图题缺少合法 slot（1-{max_slot} 的整数）：{raw_slot!r}"
+        if raw_slot < 1 or (max_slot is not None and raw_slot > max_slot):
+            return None, f"地图题 slot 超出 1-{max_slot} 范围：{raw_slot}"
+        slot = raw_slot
     # A matching stem that repeats the option text is answerable by string
     # comparison ("Which aspect involves considering <option text>?").
     stem_norm = _norm(stem)
@@ -1018,6 +1045,7 @@ def _validate_matching_item(
             word_limit=None,
             group_title=str(raw.get("group_title") or ""),
             answer_text=options["ABCDEFGH".index(answer)],
+            slot=slot,
         ),
         None,
     )
@@ -1258,6 +1286,7 @@ async def _generate_block(
     client=None,
     chat_fn=None,
     usage: list[dict] | None = None,
+    max_slot: int | None = None,
 ) -> tuple[list[tuple[str, list[ExamItem], list[str]]], list[str], str | None]:
     """Generate one request block (one type, N items) from an audio zone.
 
@@ -1266,7 +1295,8 @@ async def _generate_block(
     first zone exactly as the user arranged). ``shared_options`` makes every
     chunk -- and every later block of the same type -- reuse one option
     pool. ``layout_hint`` forces every completion item's layout (§4.1);
-    ``variation`` (regenerate) appends the cache-busting marker (§8.3).
+    ``variation`` (regenerate) appends the cache-busting marker (§8.3);
+    ``max_slot`` is the map scene's numbered-blank count (slot rider).
     Every LLM call is task-labelled ``exam:<type>`` and lands in ``usage``.
 
     Returns ``(blocks, warnings, refusal)``: ``refusal`` is the reason
@@ -1422,6 +1452,7 @@ async def _generate_block(
             ctx,
             shared_options=local_pool,
             layout_hint=layout_hint,
+            max_slot=max_slot,
         )
         if local_pool is None and qtype.answer_kind == "matching":
             for _t, _items, chunk_options, _errs in blocks:
@@ -1486,6 +1517,7 @@ async def _generate_block(
                     ctx,
                     shared_options=local_pool,
                     layout_hint=layout_hint,
+                    max_slot=max_slot,
                 )
             )
 
@@ -1713,8 +1745,15 @@ def _validate_response(
     ctx: ExamContext,
     shared_options: list[str] | None = None,
     layout_hint: str | None = None,
+    max_slot: int | None = None,
 ) -> list[tuple[str, list[ExamItem], list[str], list[str]]]:
-    """Validate one LLM response; returns ``[(title, items, options, warnings)]``."""
+    """Validate one LLM response; returns ``[(title, items, options, warnings)]``.
+
+    ``max_slot`` is the scene's numbered-blank count for map blocks: the
+    explicit ``slot`` on each map item must fall in 1..max_slot (T13
+    rider). ``None`` leaves map items without a ceiling (and non-map
+    matching never validates slots).
+    """
     groups = obj.get("groups")
     if not isinstance(groups, list):
         return [("", [], [], ["拒绝：LLM 未返回 groups 数组"])]
@@ -1755,11 +1794,13 @@ def _validate_response(
                 out.append((title, [], options, warnings))
                 continue
             used: set[str] = set()
+            used_slots: set[int] = set()
             for raw in raw_items:
                 if not isinstance(raw, Mapping):
                     continue
                 item, err = _validate_matching_item(
-                    raw, options, words_json, sentences, qtype
+                    raw, options, words_json, sentences, qtype,
+                    max_slot=max_slot,
                 )
                 if err:
                     warnings.append(f"拒绝：{err}")
@@ -1768,7 +1809,14 @@ def _validate_response(
                 if item.answer in used:
                     warnings.append(f"拒绝：选项 {item.answer} 被重复匹配")
                     continue
+                if item.slot is not None and item.slot in used_slots:
+                    # Two items on one numbered blank would leave another
+                    # slot unanswerable.
+                    warnings.append(f"拒绝：空位 {item.slot} 被重复提问")
+                    continue
                 used.add(item.answer)
+                if item.slot is not None:
+                    used_slots.add(item.slot)
                 item.group_title = title
                 items.append(item)
         elif qtype.answer_kind in ("option", "option_multi"):
@@ -1818,9 +1866,10 @@ def _validate_response(
 def _paper_count(conn, material_id: str) -> int:
     """Existing persisted papers for this material (regenerate marker).
 
-    The ``papers`` table lands with persistence (Task 14); until then (or
-    for ad-hoc connections without it) the count is zero, so the first
-    regenerate marker is ``variation: 1``.
+    With the ``papers`` table live (Task 14) this reads the real rows,
+    so the first regenerate of a material is ``variation: 1`` and each
+    stored generation bumps the marker. Ad-hoc connections without the
+    table still fall back to zero.
     """
     if conn is None or not material_id:
         return 0
@@ -1993,6 +2042,7 @@ async def generate_paper(
         # pool -- so a map block never joins the cross-block pool sharing
         # (a second map's scene would carry different fixed labels).
         visual: dict | None = None
+        max_slot: int | None = None
         shared = (
             shared_pool_by_type.get(qtype.key)
             if qtype.answer_kind == "matching" and not qtype.generates_visual
@@ -2022,6 +2072,13 @@ async def generate_paper(
             if shared is None:
                 skipped.append({"type": qtype.key, "reason": pool_reason})
                 continue
+            # The scene's numbered blanks are 1..N continuous (scene
+            # validation), so every map item slot must fall in 1..N.
+            max_slot = sum(
+                1
+                for n in (visual.get("scene") or {}).get("nodes") or []
+                if isinstance(n, Mapping) and n.get("blank_slot") is not None
+            )
         try:
             blocks_out, block_warnings, refusal = await _generate_block(
                 conn,
@@ -2040,6 +2097,7 @@ async def generate_paper(
                 client=client,
                 chat_fn=chat_fn,
                 usage=usage,
+                max_slot=max_slot,
             )
         except ExamGenError as exc:
             paper.warnings.append(str(exc))

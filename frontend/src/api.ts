@@ -336,6 +336,9 @@ export interface ExamItem {
   group_title: string
   /** Text of the keyed option, for matching types. */
   answer_text: string
+  /** The numbered map blank this item asks about (map items only);
+   * absent on every non-map item. */
+  slot?: number
 }
 
 /** One question type from GET /api/exam/types (registry shape, §4.2). */
@@ -418,7 +421,40 @@ export interface ExamPaper {
   groups: ExamGroup[]
 }
 
+/** The request spec persisted with a paper (design §5.1): what the user
+ * asked for when the paper was generated. */
+export interface PaperSpec {
+  blocks: ExamBlock[]
+  layout_hint: string | null
+  regenerate: boolean
+}
+
+/** One row of GET /api/materials/{id}/papers (design §5.2): the paper's
+ * type:count composition (of what actually generated, not the request),
+ * total item count, staleness and creation time. */
+export interface PaperSummary {
+  id: string
+  blocks: { type: string; count: number }[]
+  item_count: number
+  /** True once the material's transcript was edited after generation;
+   * stale papers stay fetchable and answerable (§5.2). */
+  stale: boolean
+  created_at: string
+}
+
+/** GET /api/papers/{id}: the stored spec plus the full paper JSON. */
+export interface PaperDetail {
+  id: string
+  material_id: string
+  spec: PaperSpec
+  paper: ExamPaper
+  stale: boolean
+  created_at: string
+}
+
 export interface GenerateExamResult {
+  /** Id of the persisted papers row (design §5.1). */
+  paper_id: string
   paper: ExamPaper
   skipped: SkippedBlock[]
 }
@@ -561,4 +597,14 @@ export const api = {
         regenerate: Boolean(opts?.regenerate),
       }),
     ),
+
+  /* ------------------------------------------------- stored papers (§5.1) */
+
+  /** The material's stored papers, newest first (design §5.2). */
+  listPapers: (materialId: string) =>
+    request<PaperSummary[]>(`/materials/${materialId}/papers`),
+  /** One stored paper: spec + full paper JSON (scene included). */
+  getPaper: (id: string) => request<PaperDetail>(`/papers/${id}`),
+  deletePaper: (id: string) =>
+    request<void>(`/papers/${id}`, { method: 'DELETE' }),
 }

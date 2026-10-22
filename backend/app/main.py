@@ -24,6 +24,7 @@ from app.routers import (
     exam as exam_router,
     health as health_router,
     materials as materials_router,
+    papers as papers_router,
     prompts as prompts_router,
     review as review_router,
     sets as sets_router,
@@ -119,6 +120,7 @@ def create_app(
     app.include_router(prompts_router.router, prefix="/api")
     app.include_router(asr_router.router, prefix="/api")
     app.include_router(materials_router.router, prefix="/api")
+    app.include_router(papers_router.router, prefix="/api")
     app.include_router(batches_router.router, prefix="/api")
     app.include_router(sets_router.router, prefix="/api")
     app.include_router(attempts_router.router, prefix="/api")

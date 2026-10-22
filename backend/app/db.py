@@ -115,10 +115,53 @@ CREATE TABLE IF NOT EXISTS llm_cache(
   created_at TEXT NOT NULL
 );
 
+-- Whole-paper persistence (design §5.1, Task 14). user_version stays at
+-- 2: CREATE TABLE IF NOT EXISTS migrates existing databases additively;
+-- the fresh-schema cut (dropping the legacy set/blank/attempt tables,
+-- user_version=3) belongs to a later task.
+CREATE TABLE IF NOT EXISTS papers(
+  id TEXT PRIMARY KEY,
+  material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+  spec_json TEXT NOT NULL,      -- user request: blocks + layout_hint + regenerate
+  paper_json TEXT NOT NULL,     -- full paper dict (incl. visual scene)
+  generation_json TEXT NOT NULL DEFAULT '[]',  -- per-call usage accounting (§8)
+  stale INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+-- Server-graded answering (design §5.1): no score history, only the
+-- per-item correct flag; stats aggregate per-item accuracy.
+CREATE TABLE IF NOT EXISTS paper_attempts(
+  id TEXT PRIMARY KEY,
+  paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_attempt_items(
+  attempt_id TEXT NOT NULL REFERENCES paper_attempts(id) ON DELETE CASCADE,
+  item_number INTEGER NOT NULL,
+  item_type TEXT NOT NULL,
+  user_answer TEXT,
+  correct INTEGER NOT NULL DEFAULT 0,
+  expected TEXT
+);
+-- Intensive-listening material-level per-sentence translation snapshot
+-- (design §7); created now, used by the translating stage later.
+CREATE TABLE IF NOT EXISTS material_translations(
+  material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+  sentence_index INTEGER NOT NULL,
+  src TEXT NOT NULL,
+  dst TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(material_id, sentence_index)
+);
+
 CREATE INDEX IF NOT EXISTS idx_blanks_set ON blanks(set_id);
 CREATE INDEX IF NOT EXISTS idx_attempt_items_attempt ON attempt_items(attempt_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_material ON attempts(material_id);
 CREATE INDEX IF NOT EXISTS idx_sets_material ON question_sets(material_id);
+CREATE INDEX IF NOT EXISTS idx_papers_material ON papers(material_id);
+CREATE INDEX IF NOT EXISTS idx_paper_attempts_paper ON paper_attempts(paper_id);
+CREATE INDEX IF NOT EXISTS idx_paper_attempt_items_attempt ON paper_attempt_items(attempt_id);
 """
 
 

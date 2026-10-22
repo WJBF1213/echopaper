@@ -226,9 +226,9 @@ def test_exam_generates_paper_with_stub_llm(client, tmp_db, monkeypatch):
     )
     assert res.status_code == 200, res.text
     data = res.json()
-    # Task 10 shape: {paper, skipped}; paper_id arrives with persistence
-    # (Task 14).
-    assert set(data) == {"paper", "skipped"}
+    # Task 14 shape: generation persists, so the id rides the response.
+    assert set(data) == {"paper_id", "paper", "skipped"}
+    assert data["paper_id"]
     assert data["skipped"] == []
     paper = data["paper"]
     assert paper["material_id"] == mid
@@ -346,7 +346,7 @@ def test_exam_mixed_refusal_returns_200_with_skipped(client, tmp_db, monkeypatch
     )
     assert res.status_code == 200, res.text
     data = res.json()
-    assert set(data) == {"paper", "skipped"}
+    assert set(data) == {"paper_id", "paper", "skipped"}
     assert data["paper"]["total_items"] == 1
     assert [g["type"] for g in data["paper"]["groups"]] == ["completion"]
     assert len(data["skipped"]) == 1
