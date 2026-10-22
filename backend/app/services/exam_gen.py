@@ -47,7 +47,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from app.services import exam_scene, llm, pos, prompts
+from app.services import exam_scene, llm, normalize, pos, prompts
 from app.services.exam_presets import QUESTION_TYPES, QuestionType
 from app.services.llm import LlmError
 
@@ -461,7 +461,9 @@ class GenerateResult:
 
 
 def _sentence_text(words: list[str], s: int, e: int) -> str:
-    return " ".join(words[s : e + 1]).strip()
+    # Delegates to the single authoritative derivation (spec §7.1) so exam
+    # prompts, rubric checks and translation cache keys can never diverge.
+    return normalize.sentence_text(words, s, e)
 
 
 def is_rubric(text: str) -> bool:

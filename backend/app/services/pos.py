@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from app.services import normalize
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 WORDFREQ_FILE = DATA_DIR / "wordfreq_en.txt"
 
@@ -169,7 +171,8 @@ def _formulaic_words(words: list[str], ranges: list[tuple[int, int]]) -> set[int
     """
     out: set[int] = set()
     for s, e in ranges:
-        text = " ".join(words[s : e + 1]).strip()
+        # authoritative sentence derivation (spec §7.1)
+        text = normalize.sentence_text(words, s, e)
         match = _GREETING_RE.search(text) or _CLOSING_RE.search(text)
         if not match:
             continue

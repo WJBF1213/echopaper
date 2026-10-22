@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import httpx
 
 from app import db, i18n
-from app.services import llm
+from app.services import llm, normalize
 
 GTX_URL = "https://translate.googleapis.com/translate_a/single"
 MYMEMORY_URL = "https://api.mymemory.translated.net/get"
@@ -135,3 +135,22 @@ async def translate(
     finally:
         if own:
             await client.aclose()
+
+
+async def translate_sentence(
+    words_json: list[dict],
+    start: int,
+    end: int,
+    llm_cfg=None,
+    conn=None,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    """Translate one sentence given as a closed word-index range (§7.1).
+
+    Both the cache key and the request text derive from the single
+    authoritative ``normalize.sentence_text`` (space join, no
+    punctuation), so every historical derivation style hits the same
+    ``translations`` row instead of missing itself.
+    """
+    text = normalize.sentence_text(words_json, start, end)
+    return await translate(text, llm_cfg=llm_cfg, conn=conn, client=client)

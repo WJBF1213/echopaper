@@ -110,6 +110,28 @@ def _split_long(start: int, end: int, commas: list[int]) -> list[list[int]]:
     return _split_long(start, cut, commas) + _split_long(cut + 1, end, commas)
 
 
+def sentence_text(words_json: list, start: int, end: int) -> str:
+    """Single authoritative sentence-text derivation (redesign spec §7.1).
+
+    Space-join of words ``start..end`` inclusive; no punctuation added,
+    no trailing period. Byte-identical to the frontend ``sentenceText``
+    helper (frontend/src/lib/time.ts):
+    ``words.slice(start, end + 1).map(w => w.w).join(' ').trim()``.
+
+    Accepts words_json dicts (``{"w": ...}``) or plain word strings, so
+    every backend derivation site (translation cache keys and request
+    text, exam prompt/rubric checks, POS formula matching) funnels
+    through this one function. ``words_to_text``'s period-appending
+    behaviour is display-only (the materials.transcript field) and is
+    never a translation key.
+    """
+    tokens = [
+        str(w.get("w", "")) if isinstance(w, dict) else str(w)
+        for w in words_json[start : end + 1]
+    ]
+    return " ".join(tokens).strip()
+
+
 def words_to_text(words: list[dict], sentences: list[list[int]] | None = None) -> str:
     """Rebuild readable text: spaces between words, no space before '. '."""
     if sentences is None:
