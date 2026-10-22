@@ -86,20 +86,20 @@ Common requirements:
 
 ### macOS
 
-Double-click **`启动应用.command`**. On the first run it creates `.venv`,
+Double-click **`start-macos.command`**. On the first run it creates `.venv`,
 installs dependencies (including `mlx-whisper` / `parakeet-mlx`), tries to
 install the spaCy English model, writes a default `.env`, starts the server, and
-opens <http://127.0.0.1:8300>. Double-click **`停止应用.command`** to stop the
+opens <http://127.0.0.1:8300>. Double-click **`stop-macos.command`** to stop the
 server; all model memory is released immediately.
 
 If macOS blocks the script, right-click it and choose **Open**, or run
-`chmod +x 启动应用.command 停止应用.command` once in Terminal.
+`chmod +x start-macos.command stop-macos.command` once in Terminal.
 
 ### Windows
 
-Double-click **`启动应用.bat`**. The first run creates the virtual environment,
-installs dependencies, sets up the spaCy model, writes a default `.env`, starts
-the server, and opens <http://127.0.0.1:8300>. Double-click **`停止应用.bat`** to
+Double-click **`start-windows.bat`**. The first run creates the virtual environment,
+installs dependencies, sets up the spaCy model, writes a default `.env`, starts the
+server, and opens <http://127.0.0.1:8300>. Double-click **`stop-windows.bat`** to
 stop the server and release model memory.
 
 Both launchers install from the Tsinghua PyPI mirror and use the
@@ -334,22 +334,13 @@ data/                   Runtime: app.db, audio/, incoming/ (ignored by Git)
 .models/                Hugging Face model cache (ignored by Git)
 docs/                   Design and implementation docs (mostly Chinese)
 docs/ADDING_A_LANGUAGE.md  Step-by-step localization guide
-启动应用.command / 停止应用.command              macOS launchers
-启动应用.bat / 停止应用.bat                      Windows launchers
+start-macos.command / stop-macos.command         macOS launchers
+start-windows.bat / stop-windows.bat             Windows launchers
 LICENSE                 MIT
 SECURITY.md             Vulnerability reporting and key handling
 CONTRIBUTING.md         Setup, conventions, language guide
 README.zh-CN.md         Chinese translation of this README
 ```
-
-## Legacy files
-
-The following files are kept for reference and are **not** used by the current
-app. Their data is not compatible with the new backend:
-
-- `雅思听力挖空练习.html` — the original single-file version.
-- `asr_server.py` + `启动本地识别服务.command` / `启动本地识别服务.bat` — a legacy
-  Qwen3-ASR resident service on port 8399.
 
 ## License
 

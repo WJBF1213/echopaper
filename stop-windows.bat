@@ -2,7 +2,7 @@
 chcp 65001 >nul
 setlocal EnableExtensions
 
-echo [INFO] Stopping the IELTS app on port 8300 ...
+echo [INFO] Stopping EchoPaper on port 8300 ...
 
 where powershell >nul 2>nul
 if errorlevel 1 goto netstat_fallback

@@ -6,7 +6,7 @@ cd /d "%~dp0"
 set "ROOT=%~dp0"
 if not defined PORT set "PORT=8300"
 
-echo [INFO] IELTS Listening Cloze Practice - Windows launcher
+echo [INFO] EchoPaper - Windows launcher
 echo.
 
 rem ---------------------------------------------------------------

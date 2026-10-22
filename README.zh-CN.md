@@ -74,19 +74,19 @@ Windows 与 macOS 均受支持。Intel Mac 和 Linux 可运行应用，并使用
 
 ### macOS
 
-双击 **`启动应用.command`**。首次运行会自动：创建 `.venv`、安装依赖（含
+双击 **`start-macos.command`**。首次运行会自动：创建 `.venv`、安装依赖（含
 `mlx-whisper` / `parakeet-mlx`）、尝试安装 spaCy 英文模型、写入默认 `.env`、
-启动服务并打开 <http://127.0.0.1:8300>。双击 **`停止应用.command`** 停止服务，
+启动服务并打开 <http://127.0.0.1:8300>。双击 **`stop-macos.command`** 停止服务，
 识别模型与内存立即释放。
 
 若 macOS 拦截脚本，右键选择 **打开**，或在终端执行一次
-`chmod +x 启动应用.command 停止应用.command`。
+`chmod +x start-macos.command stop-macos.command`。
 
 ### Windows
 
-双击 **`启动应用.bat`**。首次运行会创建虚拟环境、安装依赖、配置 spaCy 模型、
+双击 **`start-windows.bat`**。首次运行会创建虚拟环境、安装依赖、配置 spaCy 模型、
 写入默认 `.env`、启动服务并打开 <http://127.0.0.1:8300>。双击
-**`停止应用.bat`** 停止服务并释放模型内存。
+**`stop-windows.bat`** 停止服务并释放模型内存。
 
 两个平台的启动脚本默认使用清华 PyPI 镜像安装依赖，并使用
 `HF_ENDPOINT=https://hf-mirror.com` 下载模型。LLM 为可选项，没有 API key 也能
@@ -300,21 +300,13 @@ data/                   运行时：app.db、audio/、incoming/（Git 忽略）
 .models/                Hugging Face 模型缓存（Git 忽略）
 docs/                   设计与实现文档（以中文为主）
 docs/ADDING_A_LANGUAGE.md  本地化分步指南
-启动应用.command / 停止应用.command              macOS 启动/停止
-启动应用.bat / 停止应用.bat                      Windows 启动/停止
+start-macos.command / stop-macos.command         macOS 启动/停止
+start-windows.bat / stop-windows.bat             Windows 启动/停止
 LICENSE                 MIT
 SECURITY.md             漏洞报告与密钥处理
 CONTRIBUTING.md         开发环境、约定与语言指南
 README.zh-CN.md         本中文 README
 ```
-
-## 旧版本
-
-以下文件仅供留档，当前应用**不再使用**，其数据与新后端不兼容：
-
-- `雅思听力挖空练习.html` — 最早的单文件版本。
-- `asr_server.py` + `启动本地识别服务.command` / `启动本地识别服务.bat` — 旧版
-  Qwen3-ASR 常驻服务（端口 8399）。
 
 ## 许可证
 
