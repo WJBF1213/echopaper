@@ -37,8 +37,8 @@ router = APIRouter()
 
 def _get_paper(conn: sqlite3.Connection, paper_id: str) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT id, material_id, spec_json, paper_json, stale, created_at"
-        " FROM papers WHERE id=?",
+        "SELECT id, material_id, spec_json, paper_json, generation_json,"
+        " stale, created_at FROM papers WHERE id=?",
         (paper_id,),
     ).fetchone()
     if row is None:
@@ -96,13 +96,16 @@ def list_papers(material_id: str, request: Request):
 
 @router.get("/papers/{paper_id}")
 def get_paper(paper_id: str, request: Request):
-    """The stored spec and full paper JSON (scene included)."""
+    """The stored spec and full paper JSON (scene included), plus the
+    parsed ``generation`` usage ledger so the client can show what this
+    paper's generation cost (calls + tokens, §8 accounting)."""
     row = _get_paper(request.app.state.conn, paper_id)
     return {
         "id": row["id"],
         "material_id": row["material_id"],
         "spec": json.loads(row["spec_json"]),
         "paper": json.loads(row["paper_json"]),
+        "generation": json.loads(row["generation_json"] or "null") or [],
         "stale": bool(row["stale"]),
         "created_at": row["created_at"],
     }

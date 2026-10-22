@@ -354,6 +354,16 @@ export interface PaperSpec {
   regenerate: boolean
 }
 
+/** One entry of a paper's persisted generation usage ledger (§8):
+ * per-call token accounting as recorded at generation time. */
+export interface GenerationUsageEntry {
+  task: string
+  prompt_tokens: number
+  completion_tokens: number
+  cached_tokens: number
+  cached_hit: boolean
+}
+
 /** One row of GET /api/materials/{id}/papers (design §5.2): the paper's
  * type:count composition (of what actually generated, not the request),
  * total item count, staleness and creation time. */
@@ -367,12 +377,15 @@ export interface PaperSummary {
   created_at: string
 }
 
-/** GET /api/papers/{id}: the stored spec plus the full paper JSON. */
+/** GET /api/papers/{id}: the stored spec plus the full paper JSON, and
+ * the parsed generation usage ledger for observability (§8). */
 export interface PaperDetail {
   id: string
   material_id: string
   spec: PaperSpec
   paper: ExamPaper
+  /** Per-call LLM usage of this paper's generation (empty when absent). */
+  generation: GenerationUsageEntry[]
   stale: boolean
   created_at: string
 }

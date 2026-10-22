@@ -268,13 +268,10 @@ class JobManager:
         Runs after the material row is stored on EVERY pipeline path
         (single import, batch import, transcript-only). No key
         configured -> the whole stage is skipped with a note; the job
-        never errors here. Sentences the LLM batch missed or failed get
-        the existing per-sentence channels (gtx -> MyMemory -> LLM) as
-        fallback; a sentence failing every channel is simply absent from
-        the snapshot (the listen view shows its placeholder). Results
-        land in material_translations and are written back to the shared
-        translations cache for cross-material dedup. Returns the job
-        note to surface at done.
+        never errors here. The stage body itself is the shared
+        ``translate_svc.translate_material_sentences`` (also used by the
+        transcript re-edit endpoint); this wrapper owns the job row's
+        state/progress updates. Returns the job note to surface at done.
         """
         cfg = None
         if self.llm_settings_fn is not None:
@@ -287,81 +284,14 @@ class JobManager:
             # batch-importing 50 files without a key must not explode).
             return "; ".join(x for x in (note, i18n.t("llm.no_key")) if x)
 
-        # §7.1: src text derives from the single authoritative function;
-        # sentences already in the shared cache skip the LLM entirely.
-        all_pairs: list[tuple[int, str]] = []  # every non-empty sentence
-        pending: list[tuple[int, str]] = []    # not in the shared cache
-        results: dict[int, str] = {}
-        for idx, (s, e) in enumerate(sents):
-            text = normalize.sentence_text(words, s, e)
-            if not text:
-                continue
-            all_pairs.append((idx, text))
-            cached = translate_svc.lookup_cached(self.conn, text)
-            if cached is not None:
-                results[idx] = cached
-            else:
-                pending.append((idx, text))
-        if not all_pairs:
-            return note
-
         self._update(job_id, state="translating", percent=30.0,
                      message=i18n.t("job.translating"))
-        total = len(pending)
-        size = translate_svc.TRANSLATE_BATCH_SIZE
-        for i in range(0, total, size):
-            chunk = pending[i : i + size]
-            try:
-                got = await translate_svc.translate_llm_batch(
-                    self.conn, cfg, chunk
-                )
-            except Exception:  # noqa: BLE001 - the material is already
-                # stored; any translation trouble (LlmError, an httpx
-                # status from a bad key, a broken prompt override)
-                # degrades to the per-sentence channels instead of
-                # failing the job (§7.2: translation never kills it).
-                got = {}
-            for idx, text in chunk:
-                if idx in got:
-                    continue
-                try:
-                    got[idx] = await translate_svc.translate(
-                        text, llm_cfg=cfg, conn=self.conn
-                    )
-                except Exception:  # noqa: BLE001 - TranslateError (every
-                    # channel down) or an unexpected transport failure:
-                    # the sentence just stays untranslated (no snapshot
-                    # row; the listen view shows its placeholder).
-                    continue
-            results.update(got)
-            done = min(i + size, total)
-            self._update(job_id, percent=30.0 + 40.0 * done / total)
-
-        stamp = _now()
-        snap_rows = []
-        cache_rows = []
-        for idx, text in all_pairs:
-            dst = results.get(idx)
-            if not dst:
-                continue
-            snap_rows.append((material_id, idx, text, dst, stamp))
-            cache_rows.append((translate_svc._hash(text), text, dst, stamp))
-        if snap_rows:
-            with db._write_lock:
-                with self.conn:
-                    self.conn.executemany(
-                        "INSERT OR REPLACE INTO material_translations"
-                        "(material_id,sentence_index,src,dst,created_at)"
-                        " VALUES(?,?,?,?,?)",
-                        snap_rows,
-                    )
-                    # writeback to the shared cache: 同句同译 across
-                    # materials (§7.2)
-                    self.conn.executemany(
-                        "INSERT OR REPLACE INTO translations"
-                        "(hash,src,dst,created_at) VALUES(?,?,?,?)",
-                        cache_rows,
-                    )
+        await translate_svc.translate_material_sentences(
+            self.conn, cfg, material_id, words, sents,
+            on_progress=lambda done, total: self._update(
+                job_id, percent=30.0 + 40.0 * done / total
+            ),
+        )
         return note
 
     # ------------------------------------------------------------- helpers

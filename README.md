@@ -179,7 +179,7 @@ Platform notes:
   so tests and the API work on any platform.
 - On an Intel Mac the MLX packages are unusable. If pip cannot resolve them,
   install the remaining runtime dependencies explicitly:
-  `pip install fastapi uvicorn httpx python-multipart jsonschema spacy faster-whisper`,
+  `pip install fastapi uvicorn httpx python-multipart spacy faster-whisper`,
   then run with the `faster_whisper` engine.
 - Windows: install ffmpeg with `winget install Gyan.FFmpeg` (or from
   <https://www.gyan.dev/ffmpeg/builds/>) and make sure it is on `PATH`.

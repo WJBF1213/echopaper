@@ -90,6 +90,7 @@ describe('ReviewView', () => {
       id: 'p1',
       material_id: 'm1',
       spec: { blocks: [], layout_hint: null, regenerate: false },
+      generation: [],
       stale: false,
       created_at: '2026-10-21T10:00:00Z',
       paper: {
@@ -147,7 +148,9 @@ describe('ReviewView', () => {
     const btn = wrapper.findAll('button').find((b) => b.text().includes('重听'))
     await btn!.trigger('click')
     await flushPromises()
-    expect(router.currentRoute.value.fullPath).toBe('/paper/m1/p1')
+    // The replay link carries the word's t_start so PaperView can
+    // auto-seek the player to the wrong answer's audio position.
+    expect(router.currentRoute.value.fullPath).toBe('/paper/m1/p1?t=42.5')
     wrapper.unmount()
   })
 

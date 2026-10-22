@@ -1,6 +1,8 @@
 """Sentence translation service: gtx -> MyMemory -> LLM, plus the
-redesign §7.2 LLM-first batch channel ``translate_llm_batch`` used by
-the ingestion pipeline (the per-sentence channels remain its fallback).
+redesign §7.2 LLM-first batch channel ``translate_llm_batch`` and the
+shared snapshot stage ``translate_material_sentences`` used by the
+ingestion pipeline AND the transcript re-edit endpoint (the
+per-sentence channels remain the fallback).
 
 Results cached in the translations table keyed by source-text hash
 (the text itself derived via ``normalize.sentence_text``, §7.1).
@@ -224,3 +226,93 @@ async def translate_llm_batch(
             ):
                 out[idx] = text
     return out
+
+
+async def translate_material_sentences(
+    conn,
+    cfg,
+    material_id: str,
+    words: list[dict],
+    sents: list[list[int]],
+    *,
+    on_progress=None,
+) -> int:
+    """(Re)generate the material_translations snapshot (§7.2 stage body).
+
+    Shared by the ingestion pipeline (jobs) and the transcript re-edit
+    endpoint: src text derives from the single authoritative §7.1
+    function, sentences already in the shared cache skip the LLM
+    entirely, the LLM batch runs first and the per-sentence channels
+    (gtx -> MyMemory -> LLM) catch whatever it missed; a sentence
+    failing every channel is simply absent from the snapshot (the
+    listen view shows its placeholder). Results land in
+    material_translations and are written back to the shared
+    translations cache for cross-material dedup. ``on_progress(done,
+    total)`` fires after each pending chunk. Returns the snapshot row
+    count written.
+    """
+    all_pairs: list[tuple[int, str]] = []  # every non-empty sentence
+    pending: list[tuple[int, str]] = []    # not in the shared cache
+    results: dict[int, str] = {}
+    for idx, (s, e) in enumerate(sents):
+        text = normalize.sentence_text(words, s, e)
+        if not text:
+            continue
+        all_pairs.append((idx, text))
+        cached = lookup_cached(conn, text)
+        if cached is not None:
+            results[idx] = cached
+        else:
+            pending.append((idx, text))
+    if not all_pairs:
+        return 0
+
+    total = len(pending)
+    for i in range(0, total, TRANSLATE_BATCH_SIZE):
+        chunk = pending[i : i + TRANSLATE_BATCH_SIZE]
+        try:
+            got = await translate_llm_batch(conn, cfg, chunk)
+        except Exception:  # noqa: BLE001 - any translation trouble
+            # (LlmError, an httpx status from a bad key, a broken prompt
+            # override) degrades to the per-sentence channels instead of
+            # failing the caller (§7.2: translation never kills it).
+            got = {}
+        for idx, text in chunk:
+            if idx in got:
+                continue
+            try:
+                got[idx] = await translate(text, llm_cfg=cfg, conn=conn)
+            except Exception:  # noqa: BLE001 - TranslateError (every
+                # channel down) or an unexpected transport failure: the
+                # sentence just stays untranslated (no snapshot row).
+                continue
+        results.update(got)
+        if on_progress is not None:
+            on_progress(min(i + TRANSLATE_BATCH_SIZE, total), total)
+
+    stamp = datetime.now(timezone.utc).isoformat()
+    snap_rows = []
+    cache_rows = []
+    for idx, text in all_pairs:
+        dst = results.get(idx)
+        if not dst:
+            continue
+        snap_rows.append((material_id, idx, text, dst, stamp))
+        cache_rows.append((_hash(text), text, dst, stamp))
+    if snap_rows:
+        with db._write_lock:
+            with conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO material_translations"
+                    "(material_id,sentence_index,src,dst,created_at)"
+                    " VALUES(?,?,?,?,?)",
+                    snap_rows,
+                )
+                # writeback to the shared cache: 同句同译 across
+                # materials (§7.2)
+                conn.executemany(
+                    "INSERT OR REPLACE INTO translations"
+                    "(hash,src,dst,created_at) VALUES(?,?,?,?)",
+                    cache_rows,
+                )
+    return len(snap_rows)

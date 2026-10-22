@@ -227,7 +227,8 @@ def test_papers_list_detail_delete_roundtrip(client, tmp_db, monkeypatch):
     assert res.status_code == 200, res.text
     detail = res.json()
     assert set(detail) == {
-        "id", "material_id", "spec", "paper", "stale", "created_at",
+        "id", "material_id", "spec", "paper", "generation", "stale",
+        "created_at",
     }
     assert detail["id"] == first["paper_id"]
     assert detail["material_id"] == mid
@@ -238,6 +239,14 @@ def test_papers_list_detail_delete_roundtrip(client, tmp_db, monkeypatch):
     }
     assert detail["paper"] == first["paper"]
     assert detail["stale"] is False
+    # generation: the parsed per-call usage ledger (observability fix --
+    # the column was written but never read).
+    usage = detail["generation"]
+    assert [u["task"] for u in usage] == ["exam:completion"]
+    assert all(
+        {"prompt_tokens", "completion_tokens", "cached_tokens"} <= set(u)
+        for u in usage
+    )
 
     # Delete: 204 now, 404 afterwards, list shrinks.
     assert client.delete(f"/api/papers/{first['paper_id']}").status_code == 204

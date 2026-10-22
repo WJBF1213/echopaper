@@ -18,6 +18,7 @@ vi.mock('../api', async () => {
       submitPaperAttempt: vi.fn(),
       paperStats: vi.fn(),
       getPaper: vi.fn(),
+      listPapers: vi.fn(),
     },
   }
 })
@@ -378,6 +379,7 @@ function stubAudio() {
 beforeEach(() => {
   stubAudio()
   mocked.paperStats.mockResolvedValue([])
+  mocked.listPapers.mockResolvedValue([])
 })
 
 async function mountView(path = '/paper/m1') {
@@ -813,6 +815,7 @@ describe('PaperView historical paper', () => {
         regenerate: false,
       },
       paper: makePaper(),
+      generation: [],
       stale: true,
       created_at: '2026-10-20T10:00:00Z',
     })
@@ -832,6 +835,180 @@ describe('PaperView historical paper', () => {
     await submit!.trigger('click')
     await flushPromises()
     expect(mocked.submitPaperAttempt).toHaveBeenCalledWith('p9', { 3: 'B' })
+    wrapper.unmount()
+  })
+
+  it('renders one generation-usage line from the persisted usage ledger', async () => {
+    mocked.getPaper.mockResolvedValue({
+      id: 'p9',
+      material_id: 'm1',
+      spec: { blocks: [{ type: 'mcq_single', count: 5 }], layout_hint: null, regenerate: false },
+      paper: makePaper(),
+      generation: [
+        { task: 'exam:completion', prompt_tokens: 1000, completion_tokens: 200, cached_tokens: 400, cached_hit: false },
+        { task: 'exam:mcq_single', prompt_tokens: 500, completion_tokens: 100, cached_tokens: 0, cached_hit: true },
+      ],
+      stale: false,
+      created_at: '2026-10-20T10:00:00Z',
+    })
+    const wrapper = await mountView('/paper/m1/p9')
+
+    // Aggregated across entries: 2 calls, 1500 in (400 cached), 300 out.
+    const line = wrapper.find('.generation-usage')
+    expect(line.exists()).toBe(true)
+    expect(line.text()).toContain('本次生成共 2 次调用')
+    expect(line.text()).toContain('输入 1500 tok')
+    expect(line.text()).toContain('缓存命中 400')
+    expect(line.text()).toContain('输出 300 tok')
+    wrapper.unmount()
+  })
+
+  it('hides the generation-usage line when no usage data exists', async () => {
+    mocked.getPaper.mockResolvedValue({
+      id: 'p9',
+      material_id: 'm1',
+      spec: { blocks: [], layout_hint: null, regenerate: false },
+      paper: makePaper(),
+      generation: [],
+      stale: false,
+      created_at: '2026-10-20T10:00:00Z',
+    })
+    const wrapper = await mountView('/paper/m1/p9')
+    expect(wrapper.find('.generation-usage').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('seeks the player to the ?t= query on mount (wrong-words 重听)', async () => {
+    mocked.getPaper.mockResolvedValue({
+      id: 'p9',
+      material_id: 'm1',
+      spec: { blocks: [], layout_hint: null, regenerate: false },
+      paper: makePaper(),
+      generation: [],
+      stale: false,
+      created_at: '2026-10-20T10:00:00Z',
+    })
+    const wrapper = await mountView('/paper/m1/p9?t=15.5')
+    // The view waits briefly for the audio element to mount (same
+    // ?t= pattern as MaterialView) before seeking.
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    const audio = wrapper.find('audio').element as HTMLAudioElement
+    expect(audio.currentTime).toBeCloseTo(15.5)
+    wrapper.unmount()
+  })
+
+  it('does not seek when no ?t= query is present', async () => {
+    mocked.getPaper.mockResolvedValue({
+      id: 'p9',
+      material_id: 'm1',
+      spec: { blocks: [], layout_hint: null, regenerate: false },
+      paper: makePaper(),
+      generation: [],
+      stale: false,
+      created_at: '2026-10-20T10:00:00Z',
+    })
+    const wrapper = await mountView('/paper/m1/p9')
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    const audio = wrapper.find('audio').element as HTMLAudioElement
+    expect(audio.currentTime).toBe(0)
+    wrapper.unmount()
+  })
+})
+
+describe('PaperView regenerate control', () => {
+  beforeEach(() => {
+    mocked.getMaterial.mockResolvedValue(material)
+    mocked.examTypes.mockResolvedValue(examTypes)
+    mocked.generateExam.mockResolvedValue({ paper_id: 'p1', paper: makePaper(), skipped: [] })
+  })
+
+  it('auto-sends regenerate:true when repeating the same blocks spec', async () => {
+    const wrapper = await mountView()
+    await selectType(wrapper, '单选题')
+
+    // First generation: no prior paper for these blocks -> false.
+    await generatePaper(wrapper)
+    expect(mocked.generateExam).toHaveBeenLastCalledWith(
+      'm1',
+      [{ type: 'mcq_single', count: 5 }],
+      { layoutHint: undefined, regenerate: false },
+    )
+
+    // Same blocks again -> the identical spec would hit the LLM cache
+    // at temperature 0 and duplicate a byte-identical paper, so the
+    // view flips regenerate on automatically.
+    await generatePaper(wrapper)
+    expect(mocked.generateExam).toHaveBeenLastCalledWith(
+      'm1',
+      [{ type: 'mcq_single', count: 5 }],
+      { layoutHint: undefined, regenerate: true },
+    )
+
+    // A different blocks spec is a genuinely new paper -> false again.
+    await selectType(wrapper, '匹配题')
+    await generatePaper(wrapper)
+    expect(mocked.generateExam).toHaveBeenLastCalledWith(
+      'm1',
+      [
+        { type: 'mcq_single', count: 5 },
+        { type: 'matching', count: 5 },
+      ],
+      { layoutHint: undefined, regenerate: false },
+    )
+    wrapper.unmount()
+  })
+
+  it('seeds the repeat rule from the material\'s newest stored paper on mount', async () => {
+    mocked.listPapers.mockResolvedValue([
+      { id: 'p0', blocks: [{ type: 'mcq_single', count: 5 }], item_count: 5, stale: false, created_at: '2026-10-20T10:00:00Z' },
+    ])
+    mocked.getPaper.mockResolvedValue({
+      id: 'p0',
+      material_id: 'm1',
+      spec: { blocks: [{ type: 'mcq_single', count: 5 }], layout_hint: null, regenerate: false },
+      paper: makePaper(),
+      generation: [],
+      stale: false,
+      created_at: '2026-10-20T10:00:00Z',
+    })
+    const wrapper = await mountView()
+    expect(mocked.getPaper).toHaveBeenCalledWith('p0')
+
+    // The stored spec equals the fresh selection -> regenerate on.
+    await selectType(wrapper, '单选题')
+    await generatePaper(wrapper)
+    expect(mocked.generateExam).toHaveBeenLastCalledWith(
+      'm1',
+      [{ type: 'mcq_single', count: 5 }],
+      { layoutHint: undefined, regenerate: true },
+    )
+    wrapper.unmount()
+  })
+
+  it('surfaces a 换一卷 button that forces regenerate:true explicitly', async () => {
+    const wrapper = await mountView()
+    // No paper yet -> no swap button next to 生成整卷.
+    expect(wrapper.findAll('button').some((b) => b.text().includes('换一卷'))).toBe(false)
+
+    await selectType(wrapper, '单选题')
+    await generatePaper(wrapper)
+    // A paper now exists -> the swap button appears.
+    const swap = () => wrapper.findAll('button').find((b) => b.text().includes('换一卷'))
+    expect(swap()).toBeTruthy()
+
+    // Even with a DIFFERENT blocks spec, 换一卷 explicitly asks for a
+    // fresh variant (regenerate: true).
+    await selectType(wrapper, '匹配题')
+    await swap()!.trigger('click')
+    await flushPromises()
+    expect(mocked.generateExam).toHaveBeenLastCalledWith(
+      'm1',
+      [
+        { type: 'mcq_single', count: 5 },
+        { type: 'matching', count: 5 },
+      ],
+      { layoutHint: undefined, regenerate: true },
+    )
     wrapper.unmount()
   })
 })

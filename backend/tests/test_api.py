@@ -406,6 +406,85 @@ def test_put_transcript_deletes_material_translations(tmp_db, client):
     assert left == 0
 
 
+def test_put_transcript_regenerates_translations(tmp_db, client, monkeypatch):
+    """Fix: the deleted snapshot rows must be regenerable. With an LLM
+    key configured, the §7.2 translating stage re-runs inline after the
+    transcript update commits, so bilingual listening works immediately
+    after an edit instead of showing placeholders forever."""
+    from app import db
+    from app.services import translate_svc
+
+    db.set_setting(tmp_db, "llm", {"provider": "zhipu", "api_key": "test"})
+
+    async def fake_batch(conn, cfg, sentences, **kw):
+        return {i: f"译{i}" for i, _ in sentences}
+
+    monkeypatch.setattr(translate_svc, "translate_llm_batch", fake_batch)
+
+    mid = _seed_material(tmp_db)
+    r = client.put(
+        f"/api/materials/{mid}/transcript",
+        json={"transcript": "The little castle stands near the river."},
+    )
+    assert r.status_code == 200
+    rows = tmp_db.execute(
+        "SELECT sentence_index,dst FROM material_translations"
+        " WHERE material_id=? ORDER BY sentence_index",
+        (mid,),
+    ).fetchall()
+    assert [(r["sentence_index"], r["dst"]) for r in rows] == [(0, "译0")]
+    # The intensive-listening snapshot serves the fresh dst immediately.
+    snap = client.get(f"/api/materials/{mid}/translations").json()
+    assert snap["sentences"][0]["dst"] == "译0"
+
+
+def test_put_transcript_without_key_skips_regen_silently(tmp_db, client, monkeypatch):
+    """No key configured: the PUT still succeeds, no row is written and
+    no translation channel is ever called (skip, never an error)."""
+    from app.services import translate_svc
+
+    async def bomb(*a, **k):
+        raise AssertionError("no translation call is allowed without a key")
+
+    monkeypatch.setattr(translate_svc, "translate_llm_batch", bomb)
+    monkeypatch.setattr(translate_svc, "translate", bomb)
+
+    mid = _seed_material(tmp_db)
+    r = client.put(
+        f"/api/materials/{mid}/transcript",
+        json={"transcript": "The little castle stands near the river."},
+    )
+    assert r.status_code == 200
+    assert r.json()["transcript_source"] in ("aligned", "manual")
+    assert tmp_db.execute(
+        "SELECT COUNT(*) c FROM material_translations WHERE material_id=?",
+        (mid,),
+    ).fetchone()["c"] == 0
+
+
+def test_put_transcript_survives_translation_failure(tmp_db, client, monkeypatch):
+    """A translation failure must never fail the transcript PUT: the
+    inline regen is non-fatal (log/ignore)."""
+    from app import db
+    from app.services import translate_svc
+
+    db.set_setting(tmp_db, "llm", {"provider": "zhipu", "api_key": "test"})
+
+    async def bomb(*a, **k):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(translate_svc, "translate_llm_batch", bomb)
+    monkeypatch.setattr(translate_svc, "translate", bomb)
+
+    mid = _seed_material(tmp_db)
+    r = client.put(
+        f"/api/materials/{mid}/transcript",
+        json={"transcript": "The little castle stands near the river."},
+    )
+    assert r.status_code == 200
+    assert r.json()["words"]  # the realignment result is intact
+
+
 def test_delete_material_removes_row_and_audio(tmp_db, client, tmp_path):
     audio = tmp_path / "del.mp3"
     audio.write_bytes(b"XYZ")

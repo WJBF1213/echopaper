@@ -230,11 +230,16 @@ def material_translations(material_id: str, request: Request):
 
 
 @router.put("/materials/{material_id}/transcript")
-def put_transcript(material_id: str, body: TranscriptIn, request: Request):
+async def put_transcript(material_id: str, body: TranscriptIn, request: Request):
     """Post-edit / paste official transcript: re-align + re-anchor (§6.1).
 
     Every stored paper of the material goes stale (design §5.2 -- stale
-    papers stay fetchable/answerable, the flag is only a hint)."""
+    papers stay fetchable/answerable, the flag is only a hint). The
+    invalidated translation snapshot is regenerated inline right after
+    the update commits (same §7.2 stage body as the ingestion pipeline),
+    so bilingual listening works immediately after an edit; with no LLM
+    key the regen is skipped, and a translation failure never fails the
+    transcript PUT."""
     conn = request.app.state.conn
     row = _get_material(conn, material_id)
     words = json.loads(row["words_json"] or "[]")
@@ -281,11 +286,33 @@ def put_transcript(material_id: str, body: TranscriptIn, request: Request):
             )
             # 转写编辑即作废旧译文 (§7.2): realignment changed the
             # sentence ranges, so the translation snapshot rows are
-            # meaningless; the next pipeline run can regenerate them.
+            # meaningless; they are regenerated from the NEW ranges
+            # right below.
             conn.execute(
                 "DELETE FROM material_translations WHERE material_id=?",
                 (material_id,),
             )
+
+    # Regenerate the snapshot inline (§7.2 stage body, shared with the
+    # ingestion pipeline). Same cfg source as the exam router; without a
+    # key the stage skips silently. Non-fatal by design: a translation
+    # failure must never fail the transcript PUT (log/ignore).
+    try:
+        from app.routers.settings import effective_settings, llm_cfg_or_none
+        from app.services import translate_svc
+
+        cfg = None
+        try:
+            cfg = llm_cfg_or_none(effective_settings(conn))
+        except Exception:  # noqa: BLE001 - a broken settings read
+            cfg = None    # behaves like "no key"
+        if cfg:
+            await translate_svc.translate_material_sentences(
+                conn, cfg, material_id, words, sents
+            )
+    except Exception:  # noqa: BLE001 - transcript is already saved
+        pass
+
     return {
         "id": material_id,
         "transcript_source": source,

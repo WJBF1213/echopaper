@@ -200,9 +200,12 @@ const en: Record<string, string> = {
   'paper.layout.summary': 'Summary',
   'paper.layout.flowchart': 'Flow chart',
   'paper.generate': 'Generate full paper',
+  'paper.regenerate': 'Another paper',
   'paper.generating': 'Generating…',
   'paper.generatingHint':
     'The LLM is writing the paper; this usually takes 10–60 seconds. Please keep this page open.',
+  'paper.generationUsage':
+    'This paper took {calls} calls · {prompt} prompt tok ({cached} cached) · {completion} completion tok',
   'paper.error': 'Generation failed',
   'paper.empty': 'No paper generated yet',
   'paper.emptyHint': 'Pick question types and counts, then click “Generate full paper”.',

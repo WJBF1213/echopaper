@@ -9,6 +9,7 @@ import {
   type ExamItem,
   type ExamPaper,
   type ExamTypeInfo,
+  type GenerationUsageEntry,
   type MaterialDetail,
   type SkippedBlock,
 } from '../api'
@@ -33,6 +34,9 @@ const paper = ref<ExamPaper | null>(null)
 const paperId = ref('')
 /** Transcript was edited after this paper was generated (stale stays answerable). */
 const stale = ref(false)
+/** Persisted per-call usage ledger of the rendered paper (§8, historical
+ * view only -- the generate response carries no usage data). */
+const generationUsage = ref<GenerationUsageEntry[]>([])
 /** item_number -> {attempts, correct} from GET /papers/{id}/stats. */
 const statsByNumber = ref<Record<number, { attempts: number; correct: number }>>({})
 const skipped = ref<SkippedBlock[]>([])
@@ -40,6 +44,11 @@ const skipped = ref<SkippedBlock[]>([])
 const refusedSkipped = ref<SkippedBlock[]>([])
 /** {type: requested count} of the last successful request, for partial badges. */
 const requestedCounts = ref<Record<string, number>>({})
+/** Generation spec (blocks + completion layout hint) of the newest paper
+ * generated for this material: repeating it must send regenerate=true or
+ * the temp=0 + llm_cache combination persists a byte-identical duplicate
+ * paper. */
+const lastSpec = ref<{ blocks: ExamBlock[]; layoutHint: string | null } | null>(null)
 
 /** Selected blocks in click order — user order is the audio zone order (§4.4). */
 const selected = ref<ExamBlock[]>([])
@@ -124,6 +133,24 @@ const score = computed(() => ({
 const completionInfo = computed(() => typeMap.value.completion)
 const hasCompletion = computed(() => selected.value.some((b) => b.type === 'completion'))
 const displaySkipped = computed<SkippedBlock[]>(() => [...skipped.value, ...refusedSkipped.value])
+
+/** One small line aggregating the persisted usage ledger (§8):
+ * calls + prompt/cached/completion tokens across every entry. Null (the
+ * line hides) when the ledger is empty. */
+const usageSummary = computed<string | null>(() => {
+  const entries = generationUsage.value
+  if (!entries.length) return null
+  return t('paper.generationUsage', {
+    calls: entries.length,
+    prompt: entries.reduce((sum, u) => sum + (u.prompt_tokens || 0), 0),
+    cached: entries.reduce((sum, u) => sum + (u.cached_tokens || 0), 0),
+    completion: entries.reduce((sum, u) => sum + (u.completion_tokens || 0), 0),
+  })
+})
+
+/** True when a 换一卷 button makes sense: some paper already exists for
+ * this material (rendered now, or stored from an earlier session). */
+const hasAnyPaper = computed(() => Boolean(paper.value || lastSpec.value))
 
 function kindOfType(type: string): AnswerKind {
   const info = typeMap.value[type]
@@ -315,6 +342,7 @@ function resetPaper() {
   paper.value = null
   paperId.value = ''
   stale.value = false
+  generationUsage.value = []
   statsByNumber.value = {}
   skipped.value = []
   refusedSkipped.value = []
@@ -483,11 +511,13 @@ function applyStoredPaper(stored: {
   id: string
   spec: { blocks?: ExamBlock[] } | null
   paper: ExamPaper
+  generation?: GenerationUsageEntry[]
   stale: boolean
 }) {
   paperId.value = stored.id
   paper.value = stored.paper
   stale.value = stored.stale
+  generationUsage.value = stored.generation ?? []
   requestedCounts.value = Object.fromEntries(
     (stored.spec?.blocks ?? []).map((block) => [block.type, block.count]),
   )
@@ -508,6 +538,29 @@ async function load() {
     types.value = meta.types
     if (paperIdParam.value) {
       applyStoredPaper(await api.getPaper(paperIdParam.value))
+    } else {
+      // Seed the regenerate rule from the newest stored paper (a page
+      // reload must not forget that this spec was already generated).
+      // Cosmetic metadata: failures just leave the rule unseeded.
+      try {
+        const rows = await api.listPapers(materialId.value)
+        if (rows.length) {
+          const spec = (await api.getPaper(rows[0].id)).spec
+          lastSpec.value = spec
+            ? { blocks: spec.blocks ?? [], layoutHint: spec.layout_hint ?? null }
+            : null
+        } else {
+          lastSpec.value = null
+        }
+      } catch {
+        lastSpec.value = null
+      }
+    }
+    // ?t= auto-seek (wrong-words 重听): same wiring as MaterialView --
+    // the number is the audio position to start playback from.
+    const seekTo = Number(route.query.t)
+    if (Number.isFinite(seekTo) && seekTo > 0) {
+      setTimeout(() => seek(seekTo, true), 300)
     }
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : String(err)
@@ -516,15 +569,33 @@ async function load() {
   }
 }
 
-async function generate() {
+/** Order- and count-sensitive blocks-spec equality (the request spec). */
+function sameBlocks(a: ExamBlock[], b: ExamBlock[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((block, index) => block.type === b[index].type && block.count === b[index].count)
+  )
+}
+
+async function generate(forceRegenerate = false) {
   if (generating.value || !selected.value.length) return
   generating.value = true
   error.value = ''
   refusedSkipped.value = []
   const blocks = selected.value.map((block) => ({ ...block }))
+  const layoutHintValue = hasCompletion.value && layoutHint.value ? layoutHint.value : null
+  // With temp=0 + llm_cache, re-generating the SAME spec (blocks and
+  // layout hint) returns a byte-identical paper persisted as a
+  // duplicate -- so an identical repeat (or an explicit 换一卷) asks
+  // the backend for a fresh variant.
+  const regenerate =
+    forceRegenerate ||
+    (lastSpec.value != null &&
+      sameBlocks(blocks, lastSpec.value.blocks) &&
+      (lastSpec.value.layoutHint ?? null) === layoutHintValue)
   const opts = {
-    layoutHint: hasCompletion.value && layoutHint.value ? layoutHint.value : undefined,
-    regenerate: false,
+    layoutHint: layoutHintValue ?? undefined,
+    regenerate,
   }
   try {
     const result = await api.generateExam(materialId.value, blocks, opts)
@@ -535,6 +606,7 @@ async function generate() {
     requestedCounts.value = Object.fromEntries(
       blocks.map((block) => [block.type, block.count]),
     )
+    lastSpec.value = { blocks, layoutHint: layoutHintValue }
     clearAnswers()
     activeNumber.value = null
     playingNumber.value = null
@@ -576,6 +648,10 @@ onMounted(load)
         <span v-if="stale" class="chip warn">{{ t('paper.stale') }}</span>
       </div>
     </header>
+
+    <!-- Generation cost (§8): aggregated from the persisted usage ledger,
+         only when the data is present (historical view). -->
+    <p v-if="usageSummary" class="generation-usage">{{ usageSummary }}</p>
 
     <!-- Persistent transport (design §六): the shared PlayerBar component. -->
     <section v-if="material && hasAudio" class="card player-card">
@@ -672,11 +748,24 @@ onMounted(load)
             class="big"
             type="button"
             :disabled="generating || !selected.length"
-            @click="generate"
+            @click="generate()"
           >
             <span v-if="generating" class="spinner" aria-hidden="true"></span>
             <Icon v-else name="spark" :size="14" />
             {{ generating ? t('paper.generating') : t('paper.generate') }}
+          </button>
+
+          <!-- 换一卷: with a paper already generated for this material,
+           explicitly ask for a fresh variant (regenerate) instead of a
+           byte-identical cache hit (temp=0 + llm_cache). -->
+          <button
+            v-if="hasAnyPaper"
+            class="ghost"
+            type="button"
+            :disabled="generating || !selected.length"
+            @click="generate(true)"
+          >
+            {{ t('paper.regenerate') }}
           </button>
         </div>
 
@@ -1242,6 +1331,13 @@ onMounted(load)
 
 .head-main h1 {
   font-size: 18px;
+}
+
+.generation-usage {
+  margin: -10px 0 16px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .back {

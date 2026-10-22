@@ -99,10 +99,14 @@ async function load() {
 }
 
 function openWrong(word: WrongWord) {
-  // The stored paper has the player and the item's evidence; PaperView
-  // has no focus/auto-seek param yet, so this opens the paper only
-  // (word.t_start stays unused until that lands).
-  void router.push(`/paper/${word.material_id}/${word.paper_id}`)
+  // The stored paper has the player and the item's evidence; carrying
+  // the word's t_start as ?t= makes PaperView seek the player straight
+  // to the wrong answer's audio position (the same ?t= pattern
+  // MaterialView uses).
+  const start = word.t_start
+  const query =
+    start != null && Number.isFinite(start) && start > 0 ? `?t=${start}` : ''
+  void router.push(`/paper/${word.material_id}/${word.paper_id}${query}`)
 }
 
 onMounted(load)

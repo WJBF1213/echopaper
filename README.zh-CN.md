@@ -149,7 +149,7 @@ npm run build      # vue-tsc --noEmit && vite build -> frontend/dist
   Windows/Linux 会自动跳过。引擎模块延迟导入依赖，因此测试和 API 可在任意平台
   运行。
 - Intel Mac 无法使用 MLX 包。若 pip 无法解析它们，可显式安装其余运行时依赖：
-  `pip install fastapi uvicorn httpx python-multipart jsonschema spacy faster-whisper`，
+  `pip install fastapi uvicorn httpx python-multipart spacy faster-whisper`，
   然后使用 `faster_whisper` 引擎。
 - Windows：可用 `winget install Gyan.FFmpeg` 或从
   <https://www.gyan.dev/ffmpeg/builds/> 安装 ffmpeg，并确保在 `PATH` 中。
