@@ -1,4 +1,11 @@
-"""SQLite storage layer (Task B1). Schema per design spec §5, user_version=2."""
+"""SQLite storage layer. Fresh-schema world (design §5.1), user_version=3.
+
+数据库全新开始 (design §三): no compatibility with cloze-era data. init_db
+DROPs the legacy question_sets/blanks/attempts/attempt_items tables on every
+run; kept tables are created if missing and their existing data is never
+touched. Column sets of kept tables are unchanged from v2 so existing
+readers/writers keep working.
+"""
 from __future__ import annotations
 
 import json
@@ -6,6 +13,18 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
+
+# Legacy cloze tables removed by the EchoPaper 0.1.0 redesign (design §三,
+# user requirement 1). Children first so foreign_keys=ON never sees an
+# orphaned reference during the drops. Their indexes (idx_sets_material,
+# idx_blanks_set, idx_attempts_material, idx_attempt_items_attempt) die with
+# the tables automatically.
+_DROPS = """
+DROP TABLE IF EXISTS attempt_items;
+DROP TABLE IF EXISTS attempts;
+DROP TABLE IF EXISTS blanks;
+DROP TABLE IF EXISTS question_sets;
+"""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS materials(
@@ -22,51 +41,6 @@ CREATE TABLE IF NOT EXISTS materials(
   asr_model TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS question_sets(
-  id TEXT PRIMARY KEY,
-  material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
-  mode TEXT NOT NULL CHECK(mode IN ('llm','nouns','manual')),
-  blank_count INTEGER NOT NULL,
-  params_json TEXT NOT NULL DEFAULT '{}',
-  stale INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS blanks(
-  id TEXT PRIMARY KEY,
-  set_id TEXT NOT NULL REFERENCES question_sets(id) ON DELETE CASCADE,
-  position INTEGER NOT NULL,
-  answer TEXT NOT NULL,
-  alternatives_json TEXT NOT NULL DEFAULT '[]',
-  word_start INTEGER NOT NULL,
-  word_end INTEGER NOT NULL,
-  t_start REAL,
-  t_end REAL,
-  type TEXT,
-  word_limit TEXT
-);
-
-CREATE TABLE IF NOT EXISTS attempts(
-  id TEXT PRIMARY KEY,
-  set_id TEXT REFERENCES question_sets(id) ON DELETE SET NULL,
-  material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
-  mode TEXT NOT NULL,
-  started_at TEXT,
-  finished_at TEXT,
-  ok INTEGER NOT NULL DEFAULT 0,
-  total INTEGER NOT NULL DEFAULT 0,
-  duration_s REAL
-);
-
-CREATE TABLE IF NOT EXISTS attempt_items(
-  attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
-  blank_id TEXT,
-  word_index INTEGER,
-  user_text TEXT,
-  correct INTEGER NOT NULL DEFAULT 0,
-  expected TEXT
 );
 
 CREATE TABLE IF NOT EXISTS settings(
@@ -102,8 +76,7 @@ CREATE TABLE IF NOT EXISTS jobs(
   updated_at TEXT NOT NULL
 );
 
--- Local exact-match LLM response cache (design §8.3). user_version stays
--- at 2: CREATE TABLE IF NOT EXISTS migrates existing databases on init.
+-- Local exact-match LLM response cache (design §8.3).
 CREATE TABLE IF NOT EXISTS llm_cache(
   cache_key TEXT PRIMARY KEY,   -- sha256(PROMPTS_VERSION|base_url|model|temperature|max_tokens|canonical_messages)
   task TEXT NOT NULL,           -- 'exam:<type>' | 'scene' | 'translate' | ...
@@ -115,10 +88,7 @@ CREATE TABLE IF NOT EXISTS llm_cache(
   created_at TEXT NOT NULL
 );
 
--- Whole-paper persistence (design §5.1, Task 14). user_version stays at
--- 2: CREATE TABLE IF NOT EXISTS migrates existing databases additively;
--- the fresh-schema cut (dropping the legacy set/blank/attempt tables,
--- user_version=3) belongs to a later task.
+-- Whole-paper persistence (design §5.1).
 CREATE TABLE IF NOT EXISTS papers(
   id TEXT PRIMARY KEY,
   material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
@@ -145,7 +115,7 @@ CREATE TABLE IF NOT EXISTS paper_attempt_items(
   expected TEXT
 );
 -- Intensive-listening material-level per-sentence translation snapshot
--- (design §7); created now, used by the translating stage later.
+-- (design §7).
 CREATE TABLE IF NOT EXISTS material_translations(
   material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
   sentence_index INTEGER NOT NULL,
@@ -155,10 +125,7 @@ CREATE TABLE IF NOT EXISTS material_translations(
   PRIMARY KEY(material_id, sentence_index)
 );
 
-CREATE INDEX IF NOT EXISTS idx_blanks_set ON blanks(set_id);
-CREATE INDEX IF NOT EXISTS idx_attempt_items_attempt ON attempt_items(attempt_id);
-CREATE INDEX IF NOT EXISTS idx_attempts_material ON attempts(material_id);
-CREATE INDEX IF NOT EXISTS idx_sets_material ON question_sets(material_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_batch ON jobs(batch_id);
 CREATE INDEX IF NOT EXISTS idx_papers_material ON papers(material_id);
 CREATE INDEX IF NOT EXISTS idx_paper_attempts_paper ON paper_attempts(paper_id);
 CREATE INDEX IF NOT EXISTS idx_paper_attempt_items_attempt ON paper_attempt_items(attempt_id);
@@ -184,38 +151,12 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-# Columns added after v1. Existing databases only get CREATE TABLE IF NOT
-# EXISTS, so additive migrations are applied explicitly below.
-_JOB_COLUMNS = {
-    "batch_id": "TEXT",
-    "file_name": "TEXT",
-    "position": "INTEGER",
-}
-
-
-def _add_missing_columns(
-    conn: sqlite3.Connection, table: str, columns: dict[str, str]
-) -> None:
-    # PRAGMA table_info column 1 is the column name; use indices so this
-    # works on bare sqlite3 connections without a Row factory.
-    existing = {
-        row[1]
-        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-    }
-    for name, decl in columns.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-
-
 def init_db(conn: sqlite3.Connection) -> None:
     with _write_lock:
         with conn:
+            conn.executescript(_DROPS)
             conn.executescript(SCHEMA)
-            _add_missing_columns(conn, "jobs", _JOB_COLUMNS)
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_jobs_batch ON jobs(batch_id)"
-            )
-            conn.execute("PRAGMA user_version=2")
+            conn.execute("PRAGMA user_version=3")
 
 
 def get_setting(conn: sqlite3.Connection, key: str) -> Any | None:

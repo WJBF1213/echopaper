@@ -1,9 +1,11 @@
 """Material ingestion job pipeline tests (redesign §5.3, Task 18).
 
 The pipeline is transcription-only: ``queued -> (downloading) ->
-transcribing -> done``. There is no generating stage and nothing ever
-writes ``question_sets``/``blanks``; pasted ``[[ ]]`` brackets stay
-literal (manual parsing is gone). All engines/LLM/net are mocked.
+transcribing -> done``. There is no generating stage; the cloze tables
+(``question_sets``/``blanks``) no longer exist at all (db.py drops them
+at init, Task 19), so pasted ``[[ ]]`` brackets stay literal (manual
+parsing is gone) and nothing can ever write set/blank rows. All
+engines/LLM/net are mocked.
 """
 import asyncio
 import json
@@ -69,11 +71,16 @@ async def _run_to_completion(jm, job_id, timeout=5.0, seen=None):
 
 
 def _assert_no_sets_written(conn):
-    """Import is transcription-only: no set/blank rows ever appear."""
-    assert conn.execute(
-        "SELECT COUNT(*) c FROM question_sets").fetchone()["c"] == 0
-    assert conn.execute(
-        "SELECT COUNT(*) c FROM blanks").fetchone()["c"] == 0
+    """Import is transcription-only: the cloze tables are dropped at init
+    (fresh schema v3, Task 19), so they cannot exist — a fortiori the
+    pipeline writes nothing to them."""
+    tables = {
+        r["name"]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert not ({"question_sets", "blanks"} & tables)
 
 
 @pytest.mark.asyncio
