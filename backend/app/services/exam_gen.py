@@ -1,7 +1,6 @@
 """Blocks-based full paper generation (redesign §4, Task 10).
 
-Unlike ``question_gen`` (which only selects word spans for cloze), this
-module asks the LLM for complete, typed items grounded in the
+This module asks the LLM for complete, typed items grounded in the
 transcript: the LLM must cite a word-index span, and the validator
 checks the quote verbatim.
 

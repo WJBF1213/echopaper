@@ -10,13 +10,33 @@ keep the raw ASR words instead.
 from __future__ import annotations
 
 import difflib
+import re
+import unicodedata
 
-from app.services.grading import normalize_answer
 from app.services.normalize import norm_word
 
 MATCH_RATE_THRESHOLD = 0.6
 INSERT_CONFIDENCE = 0.5
 FALLBACK_STEP = 0.05  # seconds used when no neighbour bounds an insert
+
+_KEEP_EXTRA = re.compile(r"[^a-z0-9\-\u4e00-\u9fff\u3400-\u4dbf]")
+_WS = re.compile(r"\s+")
+
+
+def normalize_answer(s: str) -> str:
+    """Word-level canonical form used on both the official and the ASR
+    side of the alignment (moved here from the deleted blanks-world
+    ``grading.py`` in Task 18): NFKC -> lower -> drop commas/apostrophes
+    ("theyre" matches "they're", "3,000" matches "3000") -> keep only
+    [a-z0-9-] plus CJK -> collapse whitespace."""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKC", s)
+    s = s.lower()
+    s = s.replace(",", "").replace("'", "")
+    s = _KEEP_EXTRA.sub(" ", s)
+    s = _WS.sub(" ", s).strip()
+    return s
 
 
 def should_use_aligned(rate: float) -> bool:

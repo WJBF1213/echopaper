@@ -6,8 +6,8 @@ replaces the sets-world handler that lived in ``routers/review.py``
 (avg score over the legacy ``attempts`` table): the redesign drops the
 score concept entirely (design §5.1 成绩不重要 -- per-item correctness
 only), so the old handler was removed from review.py and this is the
-single implementation on the same path. review.py keeps the old
-wrong-words handler until the review endpoints are rebuilt (P19).
+single implementation on the same path. review.py now serves only the
+paper-based wrong-words book (Task 17).
 """
 from __future__ import annotations
 

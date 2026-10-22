@@ -32,7 +32,7 @@ def client(tmp_db, tmp_path):
 def test_catalogs_share_keys_and_are_non_empty():
     assert set(i18n.MESSAGES) == set(i18n.SUPPORTED)
     keys = set(i18n.MESSAGES["zh"])
-    assert len(keys) >= 59
+    assert len(keys) >= 45
     for locale in i18n.SUPPORTED:
         assert set(i18n.MESSAGES[locale]) == keys, locale
         empty = [k for k, v in i18n.MESSAGES[locale].items() if not v.strip()]
@@ -59,15 +59,17 @@ def test_normalize_locale(header, expected):
 def test_t_interpolation_and_unknown_key():
     token = i18n.set_locale("en")
     try:
-        assert i18n.t("common.unknown_mode", mode="llm") == "Unknown mode: llm"
+        assert i18n.t(
+            "common.too_many_files", limit=3
+        ) == "At most 3 files per batch; import in smaller batches"
         assert i18n.t("no.such.key") == "no.such.key"
         # Missing params leave the template intact instead of raising.
-        assert "{mode}" in i18n.t("common.unknown_mode")
+        assert "{limit}" in i18n.t("common.too_many_files")
     finally:
         i18n.reset_locale(token)
 
     assert i18n.get_locale() == i18n.DEFAULT_LOCALE
-    assert i18n.t("common.unknown_mode", mode="nouns") == "未知模式：nouns"
+    assert i18n.t("common.too_many_files", limit=5) == "单次最多 5 个音频，请分批导入"
     assert i18n.t("no.such.key") == "no.such.key"
 
 

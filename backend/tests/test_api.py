@@ -122,6 +122,10 @@ def test_static_missing_dist_graceful(client):
 
 
 def test_create_material_job_flow(app, client, tmp_path):
+    """Import = pure transcription (design §5.2): the endpoint takes no
+    mode/blank_count anymore. Extras an old client still sends are
+    ignored (Form fields nobody declares are dropped), and the payload
+    handed to the job manager carries no generation knobs."""
     r = client.post(
         "/api/materials",
         data={"name": "New", "mode": "nouns", "blank_count": "5"},
@@ -132,7 +136,8 @@ def test_create_material_job_flow(app, client, tmp_path):
     payload = app.state.test_jobs.payload
     assert payload["name"] == "New"
     assert payload["audio_bytes"] == b"ID3-bytes"
-    assert payload["mode"] == "nouns"
+    assert "mode" not in payload
+    assert "blank_count" not in payload
     j = client.get("/api/jobs/job-123").json()
     assert j["state"] == "done" and j["material_id"] == "m1"
 
@@ -143,9 +148,12 @@ def test_create_material_requires_source(client):
 
 
 def test_create_materials_batch(app, client, tmp_path):
+    """Batch import is transcription-only too: mode/blank_count/
+    generate_sets are gone; old-client extras are simply ignored."""
     r = client.post(
         "/api/materials/batch",
-        data={"name": "Batch A"},
+        data={"name": "Batch A", "mode": "llm", "blank_count": "8",
+              "generate_sets": "true"},
         files=[
             ("audios", ("one.mp3", b"one-bytes", "audio/mpeg")),
             ("audios", ("two.m4a", b"two-bytes", "audio/mp4")),
@@ -161,29 +169,16 @@ def test_create_materials_batch(app, client, tmp_path):
     first = app.state.test_jobs.calls[0]
     assert first["batch_id"] == body["batch_id"]
     assert first["position"] == 0
-    assert first["payload"]["generate"] is False
-    assert first["payload"]["mode"] == "none"
     assert first["payload"]["source_type"] == "upload"
+    assert "mode" not in first["payload"]
+    assert "blank_count" not in first["payload"]
+    assert "generate" not in first["payload"]
     assert Path(first["payload"]["audio_path"]).read_bytes() == b"one-bytes"
 
     batch = app.state.conn.execute(
         "SELECT * FROM batches WHERE id=?", (body["batch_id"],)
     ).fetchone()
     assert batch["name"] == "Batch A" and batch["total"] == 2
-
-
-def test_create_materials_batch_can_generate_sets(app, client):
-    r = client.post(
-        "/api/materials/batch",
-        data={"name": "With sets", "mode": "llm", "blank_count": "8",
-              "generate_sets": "true"},
-        files=[("audios", ("lesson.mp3", b"x", "audio/mpeg"))],
-    )
-    assert r.status_code == 200, r.text
-    payload = app.state.test_jobs.calls[0]["payload"]
-    assert payload["generate"] is True
-    assert payload["mode"] == "llm"
-    assert payload["blank_count"] == 8
 
 
 def test_create_materials_batch_validation(client):
@@ -196,13 +191,6 @@ def test_create_materials_batch_validation(client):
     )
     assert bad_ext.status_code == 400
     assert "不支持" in bad_ext.json()["detail"]
-
-    bad_mode = client.post(
-        "/api/materials/batch",
-        data={"mode": "manual", "generate_sets": "true"},
-        files=[("audios", ("a.mp3", b"x", "audio/mpeg"))],
-    )
-    assert bad_mode.status_code == 400
 
 
 def test_batch_status_and_list(tmp_db, client):
@@ -300,7 +288,9 @@ def test_material_detail(tmp_db, client):
     body = r.json()
     assert body["words"][0]["w"] == "The"
     assert body["sentences"][0] == [0, 6]
-    assert isinstance(body["sets"], list)
+    # the sets world is gone from the detail payload; papers have their
+    # own listing endpoint (GET /api/materials/{id}/papers)
+    assert "sets" not in body
     r404 = client.get("/api/materials/nope")
     assert r404.status_code == 404
 
@@ -325,125 +315,50 @@ def test_audio_missing_404(tmp_db, client):
     assert client.get(f"/api/materials/{mid}/audio").status_code == 404
 
 
-def test_put_transcript_marks_stale_and_realigns(tmp_db, client):
+def test_put_transcript_realigns_and_stales_papers(tmp_db, client):
+    """Transcript edit keeps its §6.1 realign path; the sets-era
+    stale_sets response field is gone (papers going stale is covered in
+    test_papers_api.py)."""
     mid = _seed_material(tmp_db)
-    from app.services.jobs import _uid, _now
-
-    sid = _uid()
-    tmp_db.execute(
-        "INSERT INTO question_sets(id,material_id,mode,blank_count,params_json,"
-        "stale,created_at) VALUES(?,?, 'llm',10,'{}',0,?)", (sid, mid, _now()))
-    tmp_db.execute(
-        "INSERT INTO blanks(id,set_id,position,answer,alternatives_json,"
-        "word_start,word_end,t_start,t_end,type,word_limit)"
-        " VALUES(?,?,1,'castle','[]',2,2,2.0,2.5,'noun','ONE WORD ONLY')",
-        (_uid(), sid))
     r = client.put(f"/api/materials/{mid}/transcript",
                    json={"transcript": "The little castle stands near the river."})
     assert r.status_code == 200
     body = r.json()
     assert body["transcript_source"] == "aligned"
-    assert sid in body["stale_sets"]
-    stale_row = tmp_db.execute(
-        "SELECT stale FROM question_sets WHERE id=?", (sid,)).fetchone()
-    assert stale_row["stale"] == 1
+    assert "stale_sets" not in body
     # words re-anchored to official text
     assert body["words"][2]["w"] == "castle"
-    # attempts preserved
-    assert tmp_db.execute("SELECT COUNT(*) c FROM blanks WHERE set_id=?",
-                          (sid,)).fetchone()["c"] == 1
 
 
-def test_delete_material_cascades(tmp_db, client, tmp_path):
+def test_delete_material_removes_row_and_audio(tmp_db, client, tmp_path):
     audio = tmp_path / "del.mp3"
     audio.write_bytes(b"XYZ")
     mid = _seed_material(tmp_db, audio=str(audio))
-    from app.services.jobs import _uid, _now
-
-    sid = _uid()
-    tmp_db.execute(
-        "INSERT INTO question_sets(id,material_id,mode,blank_count,params_json,"
-        "stale,created_at) VALUES(?,?, 'nouns',5,'{}',0,?)", (sid, mid, _now()))
     r = client.delete(f"/api/materials/{mid}")
     assert r.status_code == 200
     assert client.get(f"/api/materials/{mid}").status_code == 404
-    assert tmp_db.execute(
-        "SELECT COUNT(*) c FROM question_sets").fetchone()["c"] == 0
     assert not audio.exists()  # audio file removed
 
 
-def test_create_set_and_get(tmp_db, client):
+def test_cloze_routes_are_gone(tmp_db, client):
+    """The whole sets/attempts/dictation surface is deleted (design
+    §5.2): unknown paths must 404 -- paper attempts (in
+    routers/papers.py) are the only practice path now."""
     mid = _seed_material(tmp_db)
-    r = client.post(f"/api/materials/{mid}/sets",
-                    json={"mode": "nouns", "blank_count": 3})
-    assert r.status_code == 200
-    set_id = r.json()["set_id"]
-    g = client.get(f"/api/sets/{set_id}").json()
-    assert 1 <= len(g["blanks"]) <= 3
-    for b in g["blanks"]:
-        assert {"id", "position", "answer", "word_start", "word_end",
-                "t_start", "t_end", "type", "word_limit"} <= set(b)
-
-
-def test_manual_set_with_override(tmp_db, client):
-    mid = _seed_material(tmp_db)
-    r = client.post(
-        f"/api/materials/{mid}/sets",
-        json={"mode": "manual", "blank_count": 0,
-              "transcript_override": "The [castle] near the [river]."},
-    )
-    assert r.status_code == 200
-    set_id = r.json()["set_id"]
-    blanks = client.get(f"/api/sets/{set_id}").json()["blanks"]
-    assert sorted(b["answer"] for b in blanks) == ["castle", "river"]
-
-
-def test_attempt_grading_persisted(tmp_db, client):
-    mid = _seed_material(tmp_db)
-    from app.services.jobs import _uid, _now
-
-    sid = _uid()
-    tmp_db.execute(
-        "INSERT INTO question_sets(id,material_id,mode,blank_count,params_json,"
-        "stale,created_at) VALUES(?,?, 'nouns',2,'{}',0,?)", (sid, mid, _now()))
-    b1, b2 = _uid(), _uid()
-    tmp_db.executemany(
-        "INSERT INTO blanks(id,set_id,position,answer,alternatives_json,"
-        "word_start,word_end,t_start,t_end,type,word_limit)"
-        " VALUES(?,?,?,?,'[]',2,2,2.0,2.5,'noun','ONE WORD ONLY')",
-        [(b1, sid, 1, "castle"), (b2, sid, 2, "river")])
-    r = client.post(f"/api/sets/{sid}/attempts", json={"answers": [
-        {"blank_id": b1, "text": "Castle,"},   # correct after normalization
-        {"blank_id": b2, "text": "lake"},      # wrong
-    ]})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] == 1 and body["total"] == 2
-    results = {x["blank_id"]: x for x in body["results"]}
-    assert results[b1]["correct"] is True
-    assert results[b2]["correct"] is False
-    # persisted
-    row = tmp_db.execute(
-        "SELECT * FROM attempts WHERE set_id=?", (sid,)).fetchone()
-    assert row["ok"] == 1 and row["total"] == 2
-    assert tmp_db.execute(
-        "SELECT COUNT(*) c FROM attempt_items").fetchone()["c"] == 2
-    # history endpoint
-    hist = client.get(f"/api/materials/{mid}/attempts").json()
-    assert len(hist) == 1
-
-
-def test_dictation_attempt(tmp_db, client):
-    mid = _seed_material(tmp_db)
-    r = client.post(f"/api/materials/{mid}/attempts", json={
-        "mode": "dictation",
-        "items": [{"word_index": 2, "text": "castle"},
-                  {"word_index": 3, "text": "wrong"}],
-    })
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] == 1 and body["total"] == 2
-    assert body["results"][0]["correct"] is True
+    assert client.post(
+        f"/api/materials/{mid}/sets", json={"mode": "nouns"}
+    ).status_code == 404
+    assert client.get("/api/sets/x").status_code == 404
+    assert client.delete("/api/sets/x").status_code == 404
+    assert client.post(
+        "/api/sets/x/attempts", json={"answers": []}
+    ).status_code == 404
+    # dictation mode died with PracticeView's world (design §5.1)
+    assert client.post(
+        f"/api/materials/{mid}/attempts",
+        json={"mode": "dictation", "items": []},
+    ).status_code == 404
+    assert client.get(f"/api/materials/{mid}/attempts").status_code == 404
 
 
 def _craft_stored_paper(conn, mid, items):

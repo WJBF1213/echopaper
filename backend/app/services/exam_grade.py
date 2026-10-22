@@ -25,8 +25,8 @@ Normalization choices (documented, §5.2 判分规则):
   were folded; the design asks for hyphen *shape* normalization only.
 - other punctuation is KEPT: span answers are verbatim transcript
   spans, so "3,000" must not collapse onto "3000" and "it's" must not
-  collapse onto "its" (a deliberate difference from the legacy blanks
-  grading in ``app/services/grading.py``, which stripped both).
+  collapse onto "its" (a deliberate difference from the old cloze
+  grader, which stripped both).
 """
 from __future__ import annotations
 

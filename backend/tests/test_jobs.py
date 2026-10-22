@@ -1,11 +1,16 @@
-"""Task B10 tests: material ingestion job pipeline (all engines/LLM/net mocked)."""
+"""Material ingestion job pipeline tests (redesign §5.3, Task 18).
+
+The pipeline is transcription-only: ``queued -> (downloading) ->
+transcribing -> done``. There is no generating stage and nothing ever
+writes ``question_sets``/``blanks``; pasted ``[[ ]]`` brackets stay
+literal (manual parsing is gone). All engines/LLM/net are mocked.
+"""
 import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from app import db
 from app.services import jobs as jobs_mod
 from app.services.jobs import JobManager
 
@@ -36,7 +41,7 @@ class FakeEngineManager:
         self.released += 1
 
 
-def make_jm(tmp_db, raw_words=None, llm_cfg=None):
+def make_jm(tmp_db, raw_words=None):
     raw = raw_words if raw_words is not None else _raw_asr_words(
         ["Hello", "there", "friend", "The", "castle", "stands", "near",
          "the", "river", "today", "again", "friends"]
@@ -45,21 +50,30 @@ def make_jm(tmp_db, raw_words=None, llm_cfg=None):
     jm = JobManager(
         conn=tmp_db,
         engine_manager=engine,
-        llm_cfg_fn=(lambda: llm_cfg) if llm_cfg is not None else (lambda: None),
         data_dir=None,  # per-test tmp
     )
     return jm, engine
 
 
-async def _run_to_completion(jm, job_id, timeout=5.0):
+async def _run_to_completion(jm, job_id, timeout=5.0, seen=None):
     async def wait():
         while True:
             job = jm.get(job_id)
+            if seen is not None:
+                seen.append(job["state"])
             if job["state"] in ("done", "error"):
                 return job
             await asyncio.sleep(0)
 
     return await asyncio.wait_for(wait(), timeout)
+
+
+def _assert_no_sets_written(conn):
+    """Import is transcription-only: no set/blank rows ever appear."""
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM question_sets").fetchone()["c"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM blanks").fetchone()["c"] == 0
 
 
 @pytest.mark.asyncio
@@ -71,8 +85,6 @@ async def test_job_persisted_and_queryable(tmp_db, tmp_path):
         "name": "Test material",
         "source_type": "upload",
         "audio_path": str(audio),
-        "blank_count": 3,
-        "mode": "nouns",
         "data_dir": tmp_path,
     })
     job = await _run_to_completion(jm, job_id)
@@ -85,15 +97,60 @@ async def test_job_persisted_and_queryable(tmp_db, tmp_path):
     assert row is not None
     assert row["source_type"] == "upload"
     assert json.loads(row["words_json"])
-    sets = tmp_db.execute(
-        "SELECT * FROM question_sets WHERE material_id=?", (job["material_id"],)
-    ).fetchall()
-    assert len(sets) == 1
-    assert sets[0]["mode"] == "nouns"
-    blanks = tmp_db.execute(
-        "SELECT * FROM blanks WHERE set_id=?", (sets[0]["id"],)
-    ).fetchall()
-    assert 1 <= len(blanks) <= 3
+    _assert_no_sets_written(tmp_db)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_states_never_include_generating(tmp_db, tmp_path):
+    """The slimmed pipeline (§5.3): queued -> transcribing -> done for an
+    upload; the generating stage must not exist at all."""
+    jm, _ = make_jm(tmp_db)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3-fake")
+    job_id = await jm.create({
+        "name": "Stages",
+        "source_type": "upload",
+        "audio_path": str(audio),
+        "data_dir": tmp_path,
+    })
+    seen: list[str] = []
+    job = await _run_to_completion(jm, job_id, seen=seen)
+    assert job["state"] == "done"
+    assert "transcribing" in seen
+    assert "generating" not in seen
+    assert seen[-1] == "done"
+    _assert_no_sets_written(tmp_db)
+
+
+@pytest.mark.asyncio
+async def test_url_import_passes_downloading_stage(
+    tmp_db, tmp_path, monkeypatch
+):
+    """URL imports add the downloading stage: queued -> downloading ->
+    transcribing -> done (the only four states a job can take)."""
+    audio = tmp_path / "dl.mp3"
+    audio.write_bytes(b"ID3-dl")
+
+    async def fake_save_upload(data_dir, url=None, **kw):
+        await asyncio.sleep(0)  # a real download yields; so must the fake
+        return audio, 3.0
+
+    monkeypatch.setattr(jobs_mod.audio_mod, "save_upload", fake_save_upload)
+    jm, _ = make_jm(tmp_db)
+    job_id = await jm.create({
+        "name": "From URL",
+        "source_type": "url",
+        "audio_url": "http://example.com/a.mp3",
+        "data_dir": tmp_path,
+    })
+    seen: list[str] = []
+    job = await _run_to_completion(jm, job_id, seen=seen)
+    assert job["state"] == "done"
+    assert "downloading" in seen
+    assert "transcribing" in seen
+    assert "generating" not in seen
+    assert set(seen) <= {"queued", "downloading", "transcribing", "done"}
+    _assert_no_sets_written(tmp_db)
 
 
 @pytest.mark.asyncio
@@ -109,8 +166,6 @@ async def test_upload_with_transcript_aligns(tmp_db, tmp_path):
         "source_type": "upload",
         "audio_path": str(audio),
         "transcript": transcript,
-        "blank_count": 2,
-        "mode": "nouns",
         "data_dir": tmp_path,
     })
     job = await _run_to_completion(jm, job_id)
@@ -139,8 +194,6 @@ async def test_align_low_rate_falls_back_to_asr(tmp_db, tmp_path):
         "source_type": "upload",
         "audio_path": str(audio),
         "transcript": "one two three four five six seven",
-        "blank_count": 2,
-        "mode": "nouns",
         "data_dir": tmp_path,
     })
     job = await _run_to_completion(jm, job_id)
@@ -155,19 +208,24 @@ async def test_align_low_rate_falls_back_to_asr(tmp_db, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_audio_download_failure_job_error(tmp_db, tmp_path):
+async def test_audio_download_failure_job_error(tmp_db, tmp_path, monkeypatch):
+    from app.services.audio import AudioError
+
+    async def fake_save_upload(data_dir, url=None, **kw):
+        raise AudioError("download boom")
+
+    monkeypatch.setattr(jobs_mod.audio_mod, "save_upload", fake_save_upload)
     jm, _ = make_jm(tmp_db)
     data_dir = tmp_path / "data"
     job_id = await jm.create({
         "name": "Bad URL",
         "source_type": "url",
         "audio_url": "http://127.0.0.1:1/nope.mp3",
-        "blank_count": 3,
-        "mode": "nouns",
         "data_dir": data_dir,
     })
     job = await _run_to_completion(jm, job_id)
     assert job["state"] == "error"
+    assert "boom" in (job["message"] or "")
     audio_dir = data_dir / "audio"
     leftovers = list(audio_dir.glob("*")) if audio_dir.exists() else []
     assert leftovers == []  # partial download cleaned up
@@ -183,8 +241,6 @@ async def test_transcript_only_material(tmp_db, tmp_path):
         "transcript": "The little castle stands near the river. "
                      "The tall tower rises above the trees. "
                      "A quiet village sits beside the lake.",
-        "blank_count": 3,
-        "mode": "nouns",
         "data_dir": tmp_path,
     })
     job = await _run_to_completion(jm, job_id)
@@ -200,33 +256,35 @@ async def test_transcript_only_material(tmp_db, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_manual_bracket_mode_ingest(tmp_db, tmp_path):
+async def test_bracket_markers_not_parsed(tmp_db, tmp_path):
+    """Import = pure transcription (design §5.2): pasted ``[[ ]]`` / ``[]``
+    markers have no parsing path anymore -- nothing extracts answers from
+    them and no set/blank rows appear. Like every other edge punctuation
+    (commas, quotes) the bracket characters are normalized away from the
+    stored words; their content stays as plain ordinary text."""
     jm, _ = make_jm(tmp_db)
     transcript = (
-        "The [castle] stands near the river. "
-        "A quiet [village] sits beside the lake."
+        "The [[castle]] stands near the river. "
+        "A quiet [] sits beside the lake."
     )
     job_id = await jm.create({
-        "name": "Manual",
+        "name": "Marked",
         "source_type": "upload",
         "transcript": transcript,
-        "blank_count": 0,
-        "mode": "manual",
         "data_dir": tmp_path,
     })
     job = await _run_to_completion(jm, job_id)
     assert job["state"] == "done"
     row = tmp_db.execute(
-        "SELECT transcript FROM materials WHERE id=?", (job["material_id"],)
+        "SELECT * FROM materials WHERE id=?", (job["material_id"],)
     ).fetchone()
-    assert "[" not in row["transcript"] and "]" not in row["transcript"]
-    sets = tmp_db.execute(
-        "SELECT * FROM question_sets WHERE material_id=?", (job["material_id"],)
-    ).fetchall()
-    blanks = tmp_db.execute(
-        "SELECT * FROM blanks WHERE set_id=?", (sets[0]["id"],)
-    ).fetchall()
-    assert sorted(b["answer"] for b in blanks) == ["castle", "village"]
+    assert row["transcript_source"] == "manual"
+    words = json.loads(row["words_json"])
+    # the bracketed span is ordinary text now -- not an extracted answer
+    assert "castle" in [w["w"] for w in words]
+    # a punctuation-only token ("[]") normalizes to nothing
+    assert "" not in [w["w"] for w in words]
+    _assert_no_sets_written(tmp_db)
 
 
 @pytest.mark.asyncio
@@ -249,9 +307,6 @@ async def test_batch_jobs_transcribe_and_store_each(tmp_db, tmp_path):
                 "name": name,
                 "source_type": "upload",
                 "audio_path": str(path),
-                "blank_count": 0,
-                "mode": "none",
-                "generate": False,
                 "data_dir": tmp_path,
             },
             batch_id="b1",
@@ -269,8 +324,7 @@ async def test_batch_jobs_transcribe_and_store_each(tmp_db, tmp_path):
     assert len({j["material_id"] for j in jobs}) == 2
     assert engine.acquired == 2 and engine.released == 2
     # transcription-only: no sets were generated
-    assert tmp_db.execute(
-        "SELECT COUNT(*) c FROM question_sets").fetchone()["c"] == 0
+    _assert_no_sets_written(tmp_db)
     # both audio files were adopted into data_dir/audio
     assert len(list((tmp_path / "audio").glob("*"))) == 2
     rows = tmp_db.execute(
@@ -291,9 +345,6 @@ async def test_batch_job_failure_does_not_block_siblings(tmp_db, tmp_path):
             "name": "bad",
             "source_type": "upload",
             "audio_path": str(tmp_path / "missing.mp3"),
-            "blank_count": 0,
-            "mode": "none",
-            "generate": False,
             "data_dir": tmp_path,
         },
         batch_id="b2",
@@ -305,9 +356,6 @@ async def test_batch_job_failure_does_not_block_siblings(tmp_db, tmp_path):
             "name": "good",
             "source_type": "upload",
             "audio_path": str(good),
-            "blank_count": 0,
-            "mode": "none",
-            "generate": False,
             "data_dir": tmp_path,
         },
         batch_id="b2",
@@ -342,9 +390,6 @@ async def test_failed_transcription_cleans_adopted_audio(tmp_db, tmp_path):
         "name": "Broken",
         "source_type": "upload",
         "audio_path": str(audio),
-        "blank_count": 0,
-        "mode": "none",
-        "generate": False,
         "data_dir": tmp_path,
     })
     job = await _run_to_completion(jm, job_id)
@@ -368,42 +413,3 @@ def test_reconcile_interrupted_marks_stale_jobs(tmp_db):
     assert rows["j1"]["state"] == "error"
     assert "重启" in rows["j1"]["message"]
     assert rows["j2"]["state"] == "done"
-
-
-@pytest.mark.asyncio
-async def test_llm_mode_generates_set(tmp_db, tmp_path, monkeypatch):
-    from app.services import question_gen
-
-    jm, _ = make_jm(tmp_db, llm_cfg={"provider": "zhipu", "api_key": "k"})
-    audio = tmp_path / "a.mp3"
-    audio.write_bytes(b"ID3-fake")
-
-    async def fake_generate(words_json, sentences, blank_count, llm_cfg=None, **kw):
-        from app.services.question_gen import Blank, GeneratedSet
-
-        return GeneratedSet(
-            blanks=[Blank(position=1, answer=words_json[2]["w"], word_start=2,
-                          word_end=2, t_start=words_json[2]["s"],
-                          t_end=words_json[2]["e"], type="noun")],
-            source="llm",
-        )
-
-    monkeypatch.setattr(question_gen, "generate_set", fake_generate)
-    job_id = await jm.create({
-        "name": "LLM",
-        "source_type": "upload",
-        "audio_path": str(audio),
-        "blank_count": 1,
-        "mode": "llm",
-        "data_dir": tmp_path,
-    })
-    job = await _run_to_completion(jm, job_id)
-    assert job["state"] == "done"
-    sets = tmp_db.execute(
-        "SELECT * FROM question_sets WHERE material_id=?", (job["material_id"],)
-    ).fetchall()
-    assert sets[0]["mode"] == "llm"
-    blanks = tmp_db.execute(
-        "SELECT * FROM blanks WHERE set_id=?", (sets[0]["id"],)
-    ).fetchall()
-    assert len(blanks) == 1

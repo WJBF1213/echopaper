@@ -1,11 +1,13 @@
-"""Material ingestion job orchestration (Task B10).
+"""Material ingestion job orchestration.
 
-State machine per job: queued -> (downloading) -> transcribing ->
-generating -> done | error, every transition persisted to the jobs
-table. Audio + pasted transcript -> alignment (§6.1, low rate falls
-back to ASR words with a notice); transcript-only -> manual source
-(no timestamps). Transcription runs in a thread via the engine
-manager's acquire/release (one at a time).
+State machine per job: queued -> (downloading, URL imports only) ->
+transcribing -> done | error, every transition persisted to the jobs
+table. Import is pure transcription (redesign §5.3): audio + pasted
+transcript -> alignment (§6.1, low rate falls back to ASR words with a
+notice); transcript-only -> manual source (no timestamps, ``[[ ]]``
+markers stay literal). Transcription runs in a thread via the engine
+manager's acquire/release (one at a time). Papers are generated later
+on demand from the material page -- never during import.
 """
 from __future__ import annotations
 
@@ -15,14 +17,11 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
 
 from app import db, i18n
 from app.services import align as align_mod
 from app.services import audio as audio_mod
 from app.services import normalize
-from app.services import question_gen
-from app.services.manual_parse import anchor_manual, parse_manual
 
 
 def _now() -> str:
@@ -39,65 +38,15 @@ def _pseudo_words(text: str) -> tuple[list[dict], list[list[int]]]:
     return normalize.build_words_segments(raw)
 
 
-def manual_blanks(manual_items: list[dict], words: list[dict]) -> list:
-    """Anchor parsed bracket items onto words -> Blank list."""
-    from app.services.question_gen import Blank, derive_word_limit
-
-    anchored = anchor_manual(manual_items, words)
-    blanks = []
-    for position, a in enumerate(anchored, start=1):
-        i0, i1 = a["i0"], a["i1"]
-        blanks.append(
-            Blank(
-                position=position,
-                answer=a["answer"],
-                word_start=i0,
-                word_end=i1,
-                t_start=float(words[i0].get("s", 0.0)),
-                t_end=float(words[i1].get("e", 0.0)),
-                type="noun",
-                word_limit=derive_word_limit(i1 - i0 + 1),
-            )
-        )
-    return blanks
-
-
-def persist_set(conn, material_id: str, mode: str, blanks: list) -> str:
-    """Insert a question_set row plus its blanks; returns set id."""
-    set_id = _uid()
-    with db._write_lock:
-        with conn:
-            conn.execute(
-                "INSERT INTO question_sets(id,material_id,mode,blank_count,"
-                "params_json,stale,created_at) VALUES(?,?,?,?,?,?,?)",
-                (set_id, material_id, mode, len(blanks), "{}", 0, _now()),
-            )
-            for b in blanks:
-                conn.execute(
-                    "INSERT INTO blanks(id,set_id,position,answer,"
-                    "alternatives_json,word_start,word_end,t_start,t_end,"
-                    "type,word_limit) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        _uid(), set_id, b.position, b.answer,
-                        json.dumps(getattr(b, "alternatives", []) or []),
-                        b.word_start, b.word_end, b.t_start, b.t_end,
-                        b.type, b.word_limit,
-                    ),
-                )
-    return set_id
-
-
 class JobManager:
     def __init__(
         self,
         conn=None,
         engine_manager=None,
-        llm_cfg_fn: Callable[[], Any] | None = None,
         data_dir: Path | None = None,
     ):
         self.conn = conn
         self.engine = engine_manager
-        self.llm_cfg_fn = llm_cfg_fn or (lambda: None)
         self.data_dir = data_dir
         self._tasks: dict[str, asyncio.Task] = {}
 
@@ -105,15 +54,12 @@ class JobManager:
         self,
         conn=None,
         engine_manager=None,
-        llm_cfg_fn=None,
         data_dir=None,
     ) -> None:
         if conn is not None:
             self.conn = conn
         if engine_manager is not None:
             self.engine = engine_manager
-        if llm_cfg_fn is not None:
-            self.llm_cfg_fn = llm_cfg_fn
         if data_dir is not None:
             self.data_dir = data_dir
 
@@ -202,17 +148,10 @@ class JobManager:
 
     async def _pipeline(self, job_id: str, p: dict) -> None:
         data_dir = Path(p.get("data_dir") or self.data_dir or "data")
-        mode = p.get("mode") or "llm"
-        blank_count = int(p.get("blank_count") or 10)
         transcript: str | None = p.get("transcript") or None
         note: str | None = None
 
-        # -- manual mode: strip brackets first, clean text is authoritative
-        manual_items: list[dict] = []
-        if transcript and mode == "manual":
-            transcript, manual_items = parse_manual(transcript)
-
-        # -- stage 1: obtain audio ------------------------------------------------
+        # -- stage 1: obtain audio (downloading applies to URL only) --------
         audio_path: Path | None = None
         duration: float | None = None
         # The staged path is replaced once the file is adopted into data/audio;
@@ -237,7 +176,8 @@ class JobManager:
         # Point cleanup at wherever the audio actually lives now.
         p["audio_path"] = str(audio_path) if audio_path else None
 
-        # -- stage 2: words (ASR / align / manual) ---------------------------------
+        # -- stage 2: words (ASR / align / manual) ---------------------------
+        engine_obj = None
         if audio_path is not None:
             self._update(job_id, state="transcribing", percent=30,
                          message=i18n.t("job.transcribing"))
@@ -267,7 +207,7 @@ class JobManager:
         else:
             raise ValueError(i18n.t("job.no_input"))
 
-        # -- stage 3: persist material ---------------------------------------------
+        # -- stage 3: persist material -> done --------------------------------
         material_id = _uid()
         created = _now()
         audio_rel = str(audio_path) if audio_path else None
@@ -293,29 +233,6 @@ class JobManager:
                         created, created,
                     ),
                 )
-        # Batch imports default to transcription + storage only; question
-        # sets are generated later from the material page.
-        if not p.get("generate", True):
-            self._update(job_id, state="done", percent=100.0,
-                         message=note, material_id=material_id)
-            return
-
-        self._update(job_id, state="generating", percent=75,
-                     message=i18n.t("job.generating"), material_id=material_id)
-
-        # -- stage 4: question set --------------------------------------------------
-        if mode == "manual":
-            blanks = manual_blanks(manual_items, words)
-            set_mode = "manual"
-        else:
-            cfg = self.llm_cfg_fn() if mode == "llm" else None
-            generated = await question_gen.generate_set(
-                words, sents, blank_count, cfg
-            )
-            blanks = generated.blanks
-            set_mode = mode
-        persist_set(self.conn, material_id, set_mode, blanks)
-
         self._update(job_id, state="done", percent=100.0,
                      message=note, material_id=material_id)
 
@@ -343,9 +260,6 @@ class JobManager:
             await manager.release()
         else:
             await self.engine.release()
-
-    def _manual_blanks(self, manual_items, words):  # deprecated shim
-        return manual_blanks(manual_items, words)
 
 
 def reconcile_interrupted(conn) -> int:

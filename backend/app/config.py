@@ -31,7 +31,6 @@ _ENV_KEYS = {
     "LLM_MODEL": ("llm.model", str),
     "LLM_API_KEY": ("llm.api_key", str),
     "LLM_MAX_CONTEXT_TOKENS": ("llm.max_context_tokens", int),
-    "GEN_BLANK_COUNT": ("gen.blank_count", int),
 }
 
 
@@ -63,11 +62,6 @@ class LlmSettings:
 
 
 @dataclass
-class GenSettings:
-    blank_count: int = 10
-
-
-@dataclass
 class Settings:
     port: int = 8300
     data_dir: Path = field(default_factory=lambda: REPO_ROOT / "data")
@@ -76,7 +70,6 @@ class Settings:
     pip_index_url: str = "https://pypi.tuna.tsinghua.edu.cn/simple"
     asr: AsrSettings = field(default_factory=AsrSettings)
     llm: LlmSettings = field(default_factory=LlmSettings)
-    gen: GenSettings = field(default_factory=GenSettings)
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:

@@ -34,9 +34,8 @@ def effective_settings(conn) -> dict:
             "available_engines": list(engines_mod.available_engines()),
             "default_engine": engines_mod.default_engine(),
         },
-        "gen": {"blank_count": s.gen.blank_count},
     }
-    for key in ("llm", "asr", "gen"):
+    for key in ("llm", "asr"):
         stored = db.get_setting(conn, key)
         if isinstance(stored, dict):
             out[key].update(stored)
@@ -59,7 +58,7 @@ def _public(settings: dict) -> dict:
     key = llm.pop("api_key", "") or ""
     llm["has_key"] = bool(key)
     llm["key_masked"] = mask_key(key)
-    return {"llm": llm, "asr": settings["asr"], "gen": settings["gen"]}
+    return {"llm": llm, "asr": settings["asr"]}
 
 
 def llm_cfg_or_none(settings: dict) -> dict | None:
@@ -110,10 +109,6 @@ async def put_settings(body: SettingsIn, request: Request):
             result = await request.app.state.engine_manager.switch(new_engine)
             if result.get("busy"):
                 raise HTTPException(status_code=409, detail=result.get("detail"))
-    if body.gen is not None:
-        patch = body.gen.model_dump(exclude_none=True)
-        current["gen"].update(patch)
-        db.set_setting(conn, "gen", current["gen"])
 
     return _public(effective_settings(conn))
 

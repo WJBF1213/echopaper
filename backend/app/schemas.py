@@ -31,24 +31,13 @@ class AsrSettingsIn(BaseModel):
     idle_unload_min: Optional[int] = None
 
 
-class GenSettingsIn(BaseModel):
-    blank_count: Optional[int] = Field(default=None, ge=1, le=40)
-
-
 class SettingsIn(BaseModel):
     llm: Optional[LlmSettingsIn] = None
     asr: Optional[AsrSettingsIn] = None
-    gen: Optional[GenSettingsIn] = None
 
 
 class TranscriptIn(BaseModel):
     transcript: str
-
-
-class SetCreateIn(BaseModel):
-    mode: str = "llm"  # 'llm' | 'nouns' | 'manual'
-    blank_count: int = Field(default=10, ge=0, le=40)
-    transcript_override: Optional[str] = None
 
 
 # T10: the paper-generation request body (design §5.2): free blocks in user
@@ -98,16 +87,6 @@ class ExamGenerateIn(BaseModel):
         return value
 
 
-class AnswerIn(BaseModel):
-    blank_id: str
-    text: str = ""
-
-
-class AttemptIn(BaseModel):
-    answers: list[AnswerIn]
-    duration_s: Optional[float] = None
-
-
 class PaperAttemptIn(BaseModel):
     """POST /api/papers/{id}/attempts body (design §5.2, Task 15).
 
@@ -118,17 +97,6 @@ class PaperAttemptIn(BaseModel):
     """
 
     answers: dict[str, str] = Field(default_factory=dict)
-
-
-class DictationItemIn(BaseModel):
-    word_index: int
-    text: str = ""
-
-
-class DictationIn(BaseModel):
-    mode: str = "dictation"
-    items: list[DictationItemIn]
-    duration_s: Optional[float] = None
 
 
 class TranslateIn(BaseModel):

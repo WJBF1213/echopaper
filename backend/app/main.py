@@ -19,7 +19,6 @@ from app.config import REPO_ROOT, load_settings
 from . import __version__ as VERSION
 from app.routers import (
     asr as asr_router,
-    attempts as attempts_router,
     batches as batches_router,
     exam as exam_router,
     health as health_router,
@@ -27,7 +26,6 @@ from app.routers import (
     papers as papers_router,
     prompts as prompts_router,
     review as review_router,
-    sets as sets_router,
     settings as settings_router,
     stats as stats_router,
     translate as translate_router,
@@ -72,18 +70,9 @@ def create_app(
         settings_fn=asr_settings, on_switch=persist_engine
     )
 
-    def llm_cfg():
-        try:
-            from app.routers.settings import llm_cfg_or_none
-
-            return llm_cfg_or_none(effective_settings(conn))
-        except Exception:
-            return None
-
     jobs_manager.configure(
         conn=conn,
         engine_manager=engine_manager,
-        llm_cfg_fn=llm_cfg,
         data_dir=data_dir,
     )
     jobs_svc.reconcile_interrupted(conn)
@@ -125,8 +114,6 @@ def create_app(
     # redesigned by-type stats on the same /api/stats path (T15)
     app.include_router(stats_router.router, prefix="/api")
     app.include_router(batches_router.router, prefix="/api")
-    app.include_router(sets_router.router, prefix="/api")
-    app.include_router(attempts_router.router, prefix="/api")
     app.include_router(review_router.router, prefix="/api")
     app.include_router(translate_router.router, prefix="/api")
     # exploration branch: full typed IELTS papers (generated on demand)

@@ -22,7 +22,6 @@ router = APIRouter()
 
 _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 MAX_BATCH_FILES = 50
-_GENERATE_MODES = {"llm", "nouns"}
 
 
 def _get_material(conn, material_id: str):
@@ -67,9 +66,10 @@ async def create_material(
     audio: UploadFile | None = File(None),
     audio_url: str | None = Form(None),
     transcript: str | None = Form(None),
-    mode: str = Form("llm"),
-    blank_count: int = Form(10),
 ):
+    """Import = pure transcription (design §5.2): no mode/blank_count
+    parameters anymore; extra form fields an old client still sends are
+    ignored by FastAPI."""
     if audio is None and not audio_url and not transcript:
         raise HTTPException(
             status_code=400, detail=i18n.t("common.need_input")
@@ -78,8 +78,6 @@ async def create_material(
         "name": name,
         "source_type": "url" if (audio is None and audio_url) else "upload",
         "transcript": transcript or None,
-        "mode": mode,
-        "blank_count": blank_count,
         "data_dir": str(request.app.state.data_dir),
     }
     if audio is not None:
@@ -96,16 +94,13 @@ async def create_materials_batch(
     request: Request,
     audios: list[UploadFile] | None = File(None),
     name: str = Form(""),
-    mode: str = Form("nouns"),
-    blank_count: int = Form(10),
-    generate_sets: bool = Form(False),
 ):
     """Batch import: one material per audio, transcribed and stored.
 
     Audio is streamed to ``data_dir/incoming`` before enqueueing, so the
-    request never buffers the whole batch in memory. By default only ASR +
-    storage run; ``generate_sets=true`` also creates a question set per file
-    (llm/nouns only).
+    request never buffers the whole batch in memory. Transcription and
+    storage only -- papers are generated later from the material page
+    (design §5.3: batch never auto-generates).
     """
     files = [f for f in (audios or []) if f and f.filename]
     if not files:
@@ -114,11 +109,6 @@ async def create_materials_batch(
         raise HTTPException(
             status_code=400,
             detail=i18n.t("common.too_many_files", limit=MAX_BATCH_FILES),
-        )
-    if generate_sets and mode not in _GENERATE_MODES:
-        raise HTTPException(
-            status_code=400,
-            detail=i18n.t("common.batch_mode_invalid"),
         )
     for upload in files:
         if not audio_mod.has_supported_ext(upload.filename):
@@ -154,9 +144,6 @@ async def create_materials_batch(
                     "name": material_name,
                     "source_type": "upload",
                     "audio_path": str(path),
-                    "mode": mode if generate_sets else "none",
-                    "blank_count": blank_count,
-                    "generate": generate_sets,
                     "data_dir": str(data_dir),
                 },
                 batch_id=batch_id,
@@ -196,11 +183,6 @@ async def create_materials_batch(
 def material_detail(material_id: str, request: Request):
     conn = request.app.state.conn
     row = _get_material(conn, material_id)
-    sets = conn.execute(
-        "SELECT id, mode, blank_count, stale, created_at FROM question_sets"
-        " WHERE material_id=? ORDER BY created_at",
-        (material_id,),
-    ).fetchall()
     return {
         "id": row["id"],
         "name": row["name"],
@@ -213,7 +195,6 @@ def material_detail(material_id: str, request: Request):
         "asr_model": row["asr_model"],
         "words": json.loads(row["words_json"] or "[]"),
         "sentences": json.loads(row["sentences_json"] or "[]"),
-        "sets": [dict(s) for s in sets],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -223,8 +204,7 @@ def material_detail(material_id: str, request: Request):
 def put_transcript(material_id: str, body: TranscriptIn, request: Request):
     """Post-edit / paste official transcript: re-align + re-anchor (§6.1).
 
-    Existing question sets are marked stale=1 (history kept); every
-    stored paper of the material goes stale too (design §5.2 -- stale
+    Every stored paper of the material goes stale (design §5.2 -- stale
     papers stay fetchable/answerable, the flag is only a hint)."""
     conn = request.app.state.conn
     row = _get_material(conn, material_id)
@@ -250,12 +230,6 @@ def put_transcript(material_id: str, body: TranscriptIn, request: Request):
         words, sents = _pseudo(body.transcript)
         source = "manual"
 
-    stale_sets = [
-        r["id"]
-        for r in conn.execute(
-            "SELECT id FROM question_sets WHERE material_id=?", (material_id,)
-        )
-    ]
     with db._write_lock:
         with conn:
             conn.execute(
@@ -270,10 +244,6 @@ def put_transcript(material_id: str, body: TranscriptIn, request: Request):
                     material_id,
                 ),
             )
-            conn.execute(
-                "UPDATE question_sets SET stale=1 WHERE material_id=?",
-                (material_id,),
-            )
             # Papers are self-contained (answers/evidence embedded) so a
             # stale paper stays answerable -- only flag the drift (§5.2).
             conn.execute(
@@ -286,7 +256,6 @@ def put_transcript(material_id: str, body: TranscriptIn, request: Request):
         "message": message,
         "words": words,
         "sentences": sents,
-        "stale_sets": stale_sets,
     }
 
 

@@ -3,11 +3,9 @@
 ``app.services.exam_grade`` holds the pure grading functions moved up
 from the frontend's local PaperView grading: letter items are exact
 equalty, multi-answer items compare as sorted sets, span items compare
-after normalization against the answer and every alternative.
-
-The old blanks-world ``app.services.grading`` is untouched here (it
-serves the legacy sets flow until that world is deleted); this module
-covers only the new paper semantics.
+after normalization against the answer and every alternative. The old
+blanks-world ``app.services.grading`` died with the sets flow (Task 18;
+its word normalizer moved into ``align.py``).
 """
 from __future__ import annotations
 

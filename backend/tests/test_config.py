@@ -10,7 +10,7 @@ def _clear_env(monkeypatch):
         "ASR_PARAKEET_MODEL", "ASR_WHISPER_MODEL",
         "ASR_FASTER_WHISPER_MODEL",
         "LLM_PROVIDER", "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY",
-        "LLM_MAX_CONTEXT_TOKENS", "GEN_BLANK_COUNT",
+        "LLM_MAX_CONTEXT_TOKENS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -33,7 +33,6 @@ def test_load_settings_defaults(tmp_path, monkeypatch):
     assert s.llm.provider == "zhipu"
     assert s.llm.base_url == "https://open.bigmodel.cn/api/paas/v4"
     assert s.llm.api_key == ""
-    assert s.gen.blank_count == 10
     # dirs default inside the repo: data/ and .models/
     assert s.data_dir.name == "data"
     assert s.hf_home.name == ".models"
@@ -46,8 +45,7 @@ def test_load_settings_env_overrides_and_injection(tmp_path, monkeypatch):
         "PORT=8310\n"
         "HF_ENDPOINT=https://test-hf.example.com\n"
         "ASR_ENGINE=whisper\n"
-        "LLM_API_KEY=secret-key\n"
-        "GEN_BLANK_COUNT=20\n",
+        "LLM_API_KEY=secret-key\n",
         encoding="utf-8",
     )
     from app import config
@@ -57,7 +55,6 @@ def test_load_settings_env_overrides_and_injection(tmp_path, monkeypatch):
     assert s.hf_endpoint == "https://test-hf.example.com"
     assert s.asr.engine == "whisper"
     assert s.llm.api_key == "secret-key"
-    assert s.gen.blank_count == 20
     # injected into os.environ so lazy engine imports pick them up
     assert os.environ.get("HF_ENDPOINT") == "https://test-hf.example.com"
     assert os.environ.get("HF_HOME")
