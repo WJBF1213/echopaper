@@ -4,12 +4,16 @@ import { locale, t } from './i18n'
 export class ApiError extends Error {
   status: number
   detail: string
+  /** The raw error detail when the server sent a structured object body
+   * (e.g. the all-refused 400 answers `{"detail": {"skipped": [...]}}`). */
+  data?: unknown
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, data?: unknown) {
     super(detail)
     this.name = 'ApiError'
     this.status = status
     this.detail = detail
+    this.data = data
   }
 }
 
@@ -34,13 +38,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ? await res.json().catch(() => null)
     : await res.text().catch(() => '')
   if (!res.ok) {
-    const detail =
+    let detail = ''
+    let data: unknown
+    const objDetail =
       payload && typeof payload === 'object' && 'detail' in payload
-        ? String((payload as { detail: unknown }).detail)
-        : typeof payload === 'string' && payload
-          ? payload
-          : t('api.httpError', { status: res.status })
-    throw new ApiError(res.status, detail)
+        ? (payload as { detail: unknown }).detail
+        : undefined
+    if (objDetail !== undefined && objDetail !== null && typeof objDetail === 'object') {
+      // Structured body (all-refused skipped list, validation errors):
+      // keep the object on .data and stringify it for the message.
+      data = objDetail
+      detail = JSON.stringify(objDetail)
+    } else if (objDetail !== undefined) {
+      detail = String(objDetail)
+    } else if (typeof payload === 'string' && payload) {
+      detail = payload
+    } else {
+      detail = t('api.httpError', { status: res.status })
+    }
+    throw new ApiError(res.status, detail, data)
   }
   return payload as T
 }
@@ -313,9 +329,73 @@ export interface ExamItem {
   options: string[]
   evidence: ExamEvidence[]
   word_limit: string | null
+  /** Presentation layout (completion only, design §4.1); null elsewhere. */
+  layout: string | null
   label: string
   alternatives: string[]
   group_title: string
+  /** Text of the keyed option, for matching types. */
+  answer_text: string
+}
+
+/** One question type from GET /api/exam/types (registry shape, §4.2). */
+export interface ExamTypeInfo {
+  key: string
+  /** Localized per the request locale; prefer name_zh/name_en client-side. */
+  name: string
+  name_zh: string
+  name_en: string
+  answer_kind: 'span' | 'option' | 'option_multi' | 'matching' | string
+  layouts: string[]
+  generates_visual: boolean
+  max_count: number
+  min_words: number
+}
+
+export interface ExamTypes {
+  types: ExamTypeInfo[]
+}
+
+/** One requested block: {type, count} in user order (design §4.4). */
+export interface ExamBlock {
+  type: string
+  count: number
+}
+
+/** A refused block (design §4.5): the type key and a one-line reason. */
+export interface SkippedBlock {
+  type: string
+  reason: string
+}
+
+export interface MapSceneNode {
+  id: string
+  x: number
+  y: number
+  shape: 'rect' | 'circle' | string
+  /** Printed on the map when fixed. */
+  fixed?: boolean
+  label?: string
+  /** 1-based continuous slot number for blank nodes. */
+  blank_slot?: number
+}
+
+export interface MapScenePath {
+  from: string
+  to: string
+  label: string
+}
+
+/** Drawable scene in normalized 0-100 coordinates (design §4.3). */
+export interface MapSceneData {
+  canvas: { width: number; height: number }
+  nodes: MapSceneNode[]
+  paths: MapScenePath[]
+}
+
+export interface ExamVisual {
+  kind: 'map' | 'plan' | 'diagram' | string
+  scene: MapSceneData
 }
 
 export interface ExamGroup {
@@ -324,46 +404,23 @@ export interface ExamGroup {
   instruction: string
   /** Shared option pool for matching; empty for other types. */
   options: string[]
+  /** True when the block produced fewer items than requested (§4.5). */
+  partial: boolean
+  /** Scene asset for visual types (map_labelling); null elsewhere. */
+  visual: ExamVisual | null
   items: ExamItem[]
-}
-
-export interface ExamPresetInfo {
-  key: string
-  part: number
-  label: string
-  total_items: number
-  groups: { type: string; count: number }[]
-}
-
-/** The leaner echo returned next to a generated paper. */
-export interface ExamPresetRef {
-  key: string
-  label: string
-}
-
-export interface ExamTypeInfo {
-  key: string
-  label: string
-  parts: number[]
-  answer_kind: 'span' | 'option' | 'option_multi' | 'matching' | string
-  needs_visual: boolean
-  word_limit: string | null
-  instruction: string
-}
-
-export interface ExamTypes {
-  types: ExamTypeInfo[]
-  presets: ExamPresetInfo[]
 }
 
 export interface ExamPaper {
   material_id: string
-  part: number
-  preset: string
   total_items: number
   warnings: string[]
-  available_presets: ExamPresetRef[]
   groups: ExamGroup[]
+}
+
+export interface GenerateExamResult {
+  paper: ExamPaper
+  skipped: SkippedBlock[]
 }
 
 export interface CreateMaterialInput {
@@ -490,9 +547,18 @@ export const api = {
     request<{ text: string; error?: string }>('/translate', jsonInit('POST', { text })),
 
   examTypes: () => request<ExamTypes>('/exam/types'),
-  generateExam: (materialId: string, part: number, preset?: string) =>
-    request<ExamPaper>(
+  /** POST /api/materials/{id}/exam with free blocks (design §4.4/§5.2). */
+  generateExam: (
+    materialId: string,
+    blocks: ExamBlock[],
+    opts?: { layoutHint?: string; regenerate?: boolean },
+  ) =>
+    request<GenerateExamResult>(
       `/materials/${materialId}/exam`,
-      jsonInit('POST', { part, preset: preset || null }),
+      jsonInit('POST', {
+        blocks,
+        layout_hint: opts?.layoutHint ?? null,
+        regenerate: Boolean(opts?.regenerate),
+      }),
     ),
 }

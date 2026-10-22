@@ -75,4 +75,65 @@ describe('api client', () => {
   it('builds the range-capable audio URL', () => {
     expect(api.audioUrl('m1')).toBe('/api/materials/m1/audio')
   })
+
+  it('posts the blocks contract to the exam endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: () => Promise.resolve({ paper: { groups: [] }, skipped: [] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await api.generateExam(
+      'm1',
+      [
+        { type: 'completion', count: 10 },
+        { type: 'mcq_single', count: 5 },
+      ],
+      { layoutHint: 'table', regenerate: true },
+    )
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/materials/m1/exam')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body)).toEqual({
+      blocks: [
+        { type: 'completion', count: 10 },
+        { type: 'mcq_single', count: 5 },
+      ],
+      layout_hint: 'table',
+      regenerate: true,
+    })
+  })
+
+  it('omits layout_hint when no hint is given', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: () => Promise.resolve({ paper: { groups: [] }, skipped: [] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await api.generateExam('m1', [{ type: 'matching', count: 5 }])
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      blocks: [{ type: 'matching', count: 5 }],
+      layout_hint: null,
+      regenerate: false,
+    })
+  })
+
+  it('carries the structured skipped body of an all-refused 400', async () => {
+    const skipped = [{ type: 'map_labelling', reason: '转写无空间方位描述' }]
+    mockFetch({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ detail: { skipped } }),
+    })
+    const err = await api
+      .generateExam('m1', [{ type: 'map_labelling', count: 5 }])
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    const apiErr = err as ApiError
+    expect(apiErr.status).toBe(400)
+    expect(apiErr.data).toEqual({ skipped })
+  })
 })
