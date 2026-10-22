@@ -1,4 +1,4 @@
-/** Pure helpers shared by the practice UI and tests. */
+/** Pure helpers shared by the listening UI and tests. */
 import { locale, translate } from '../i18n'
 
 export function fmtTime(sec: number | null | undefined): string {
@@ -87,38 +87,6 @@ export function sentenceTimeRange(
   return { a, b: b + 0.25 }
 }
 
-export interface DictationBlank {
-  wordIndex: number
-  sentenceIndex: number
-  answer: string
-}
-
-/**
- * Virtual dictation blanks (not persisted in the blanks table, spec §5):
- * every word except the first and last of each sentence, so the sentence
- * remains locatable while the middle is dictated.
- */
-export function buildDictationBlanks(
-  words: { w: string }[],
-  sentences: [number, number][],
-): DictationBlank[] {
-  const out: DictationBlank[] = []
-  const add = (si: number, start: number, end: number) => {
-    if (end - start + 1 < 3) return
-    for (let i = start + 1; i <= end - 1; i++) {
-      const word = words[i]
-      if (!word || !/[A-Za-z0-9]/.test(word.w)) continue
-      out.push({ wordIndex: i, sentenceIndex: si, answer: word.w })
-    }
-  }
-  if (sentences.length) {
-    sentences.forEach(([start, end], si) => add(si, start, end))
-  } else if (words.length) {
-    add(0, 0, words.length - 1)
-  }
-  return out
-}
-
 export function pct(ok: number, total: number): number {
   if (!total) return 0
   return Math.round((ok / total) * 100)
@@ -135,12 +103,6 @@ export function fmtDateTime(iso: string | null | undefined): string {
     hour: '2-digit',
     minute: '2-digit',
   })
-}
-
-export function modeLabel(mode: string): string {
-  const key = `mode.${mode}`
-  const label = translate(key)
-  return label === key ? mode : label
 }
 
 export function transcriptSourceLabel(source: string): string {

@@ -96,13 +96,7 @@ onMounted(() => {
   <div>
     <header class="page-head">
       <h1>{{ t('library.title') }}</h1>
-      <p class="sub">
-        {{ t('library.subtitle.before') }}
-        <kbd>{{ t('library.key.space') }}</kbd> {{ t('library.subtitle.after') }}
-        <kbd>{{ t('library.key.left') }}</kbd> <kbd>{{ t('library.key.right') }}</kbd>
-        {{ t('library.subtitle.afterArrows') }}
-        <kbd>{{ t('library.key.enter') }}</kbd> {{ t('library.subtitle.end') }}
-      </p>
+      <p class="sub">{{ t('library.subtitle.before') }}</p>
     </header>
 
     <MaterialForm @created="start" />

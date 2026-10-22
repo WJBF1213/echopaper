@@ -577,7 +577,7 @@ onMounted(load)
       </div>
     </header>
 
-    <!-- Persistent transport (design §六): reuse the practice-page player. -->
+    <!-- Persistent transport (design §六): the shared PlayerBar component. -->
     <section v-if="material && hasAudio" class="card player-card">
       <audio
         ref="audioEl"

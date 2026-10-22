@@ -104,10 +104,6 @@ export interface AsrSettings {
   default_engine: string
 }
 
-export interface GenSettings {
-  blank_count: number
-}
-
 /** One prompt-registry entry from GET /api/prompts (title follows locale). */
 export interface PromptEntry {
   key: string
@@ -122,7 +118,6 @@ export interface PromptEntry {
 export interface Settings {
   llm: LlmSettings
   asr: AsrSettings
-  gen: GenSettings
 }
 
 export interface SettingsPatch {
@@ -130,7 +125,6 @@ export interface SettingsPatch {
     api_key?: string
   }
   asr?: Partial<AsrSettings>
-  gen?: Partial<GenSettings>
 }
 
 /** One row of GET /api/materials (design §六): paper-based counts. */
@@ -144,14 +138,6 @@ export interface MaterialListItem {
   attempts_count: number
   last_practice: string | null
   has_audio: number | boolean
-}
-
-export interface SetSummary {
-  id: string
-  mode: 'llm' | 'nouns' | 'manual' | string
-  blank_count: number
-  stale: number
-  created_at: string
 }
 
 export interface Word {
@@ -173,32 +159,8 @@ export interface MaterialDetail {
   asr_model: string | null
   words: Word[]
   sentences: [number, number][]
-  sets: SetSummary[]
   created_at: string
   updated_at: string
-}
-
-export interface Blank {
-  id: string
-  position: number
-  answer: string
-  alternatives: string[]
-  word_start: number
-  word_end: number
-  t_start: number
-  t_end: number
-  type: string
-  word_limit: string
-}
-
-export interface SetDetail {
-  id: string
-  material_id: string
-  mode: string
-  blank_count: number
-  stale: number
-  created_at: string
-  blanks: Blank[]
 }
 
 export type JobState =
@@ -256,46 +218,6 @@ export interface BatchSummary {
   percent: number
   created_at: string
   updated_at: string
-}
-
-export interface AttemptItemResult {
-  blank_id: string
-  correct: boolean
-  expected: string
-  user_text: string
-}
-
-export interface AttemptResult {
-  attempt_id: string
-  ok: number
-  total: number
-  results: AttemptItemResult[]
-}
-
-export interface DictationItemResult {
-  word_index: number
-  correct: boolean
-  expected: string
-  t_start: number | null
-  user_text: string
-}
-
-export interface DictationResult {
-  attempt_id: string
-  ok: number
-  total: number
-  results: DictationItemResult[]
-}
-
-export interface AttemptHistoryItem {
-  id: string
-  set_id: string | null
-  mode: string
-  started_at: string | null
-  finished_at: string | null
-  ok: number
-  total: number
-  duration_s: number | null
 }
 
 /** One row of GET /api/review/wrong-words (redesign §5.2): wrong items
@@ -520,16 +442,11 @@ export interface CreateMaterialInput {
   audioFile?: File | null
   audioUrl?: string
   transcript?: string
-  mode: string
-  blankCount: number
 }
 
 export interface CreateBatchInput {
   files: File[]
   name?: string
-  generateSets?: boolean
-  mode?: string
-  blankCount?: number
 }
 
 /* --------------------------------------------------------------- endpoints */
@@ -562,8 +479,6 @@ export const api = {
   createMaterial: (input: CreateMaterialInput) => {
     const form = new FormData()
     form.append('name', input.name || t('common.untitledMaterial'))
-    form.append('mode', input.mode)
-    form.append('blank_count', String(input.blankCount))
     if (input.transcript) form.append('transcript', input.transcript)
     if (input.audioUrl) form.append('audio_url', input.audioUrl)
     if (input.audioFile) form.append('audio', input.audioFile)
@@ -572,9 +487,6 @@ export const api = {
   createMaterialsBatch: (input: CreateBatchInput) => {
     const form = new FormData()
     form.append('name', input.name || '')
-    form.append('mode', input.mode || 'nouns')
-    form.append('blank_count', String(input.blankCount ?? 10))
-    form.append('generate_sets', input.generateSets ? 'true' : 'false')
     for (const file of input.files) form.append('audios', file)
     return request<{
       batch_id: string
@@ -588,7 +500,6 @@ export const api = {
       id: string
       transcript_source: string
       message: string | null
-      stale_sets: string[]
     }>(`/materials/${id}/transcript`, jsonInit('PUT', { transcript })),
   deleteMaterial: (id: string) =>
     request<{ ok: boolean }>(`/materials/${id}`, { method: 'DELETE' }),
@@ -599,43 +510,7 @@ export const api = {
   listBatches: () => request<BatchSummary[]>('/batches'),
   getBatch: (id: string) => request<BatchStatus>(`/batches/${id}`),
 
-  createSet: (materialId: string, mode: string, blankCount: number, transcriptOverride?: string) =>
-    request<{ set_id: string }>(
-      `/materials/${materialId}/sets`,
-      jsonInit('POST', {
-        mode,
-        blank_count: blankCount,
-        transcript_override: transcriptOverride,
-      }),
-    ),
-  getSet: (id: string) => request<SetDetail>(`/sets/${id}`),
-  deleteSet: (id: string) => request<{ ok: boolean }>(`/sets/${id}`, { method: 'DELETE' }),
-
-  submitAttempt: (
-    setId: string,
-    answers: { blank_id: string; text: string }[],
-    durationS?: number,
-  ) =>
-    request<AttemptResult>(
-      `/sets/${setId}/attempts`,
-      jsonInit('POST', { answers, duration_s: durationS }),
-    ),
-  submitDictation: (
-    materialId: string,
-    items: { word_index: number; text: string }[],
-    durationS?: number,
-  ) =>
-    request<DictationResult>(
-      `/materials/${materialId}/attempts`,
-      jsonInit('POST', { mode: 'dictation', items, duration_s: durationS }),
-    ),
-  getAttempts: (materialId: string) =>
-    request<AttemptHistoryItem[]>(`/materials/${materialId}/attempts`),
-
   getWrongWords: () => request<WrongWord[]>('/review/wrong-words'),
-
-  translate: (text: string) =>
-    request<{ text: string; error?: string }>('/translate', jsonInit('POST', { text })),
 
   examTypes: () => request<ExamTypes>('/exam/types'),
   /** POST /api/materials/{id}/exam with free blocks (design §4.4/§5.2). */

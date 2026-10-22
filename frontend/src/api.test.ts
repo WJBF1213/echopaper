@@ -39,25 +39,7 @@ describe('api client', () => {
     expect((err as ApiError).detail).toContain('无法连接后端服务')
   })
 
-  it('posts graded answers to the set attempts endpoint', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: () => Promise.resolve({ attempt_id: 'a1', ok: 1, total: 1, results: [] }),
-    })
-    vi.stubGlobal('fetch', fetchMock)
-    await api.submitAttempt('s1', [{ blank_id: 'b1', text: 'hello' }], 30)
-    const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('/api/sets/s1/attempts')
-    expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body)).toEqual({
-      answers: [{ blank_id: 'b1', text: 'hello' }],
-      duration_s: 30,
-    })
-  })
-
-  it('sends multipart form data for material creation', async () => {
+  it('sends multipart form data for material creation (transcription only)', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -65,11 +47,31 @@ describe('api client', () => {
       json: () => Promise.resolve({ job_id: 'j1' }),
     })
     vi.stubGlobal('fetch', fetchMock)
-    await api.createMaterial({ name: 'T1', transcript: 'hello world', mode: 'llm', blankCount: 10 })
+    await api.createMaterial({ name: 'T1', transcript: 'hello world' })
     const body = fetchMock.mock.calls[0][1].body as FormData
     expect(body.get('name')).toBe('T1')
     expect(body.get('transcript')).toBe('hello world')
-    expect(body.get('blank_count')).toBe('10')
+    // Import is transcription-only: no question-mode or blank-count fields.
+    expect(body.get('mode')).toBeNull()
+    expect(body.get('blank_count')).toBeNull()
+  })
+
+  it('sends batch imports without generation options', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: () => Promise.resolve({ batch_id: 'b1', jobs: [] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await api.createMaterialsBatch({
+      files: [new File(['a'], 'one.mp3', { type: 'audio/mpeg' })],
+    })
+    const body = fetchMock.mock.calls[0][1].body as FormData
+    expect(body.getAll('audios')).toHaveLength(1)
+    expect(body.get('mode')).toBeNull()
+    expect(body.get('blank_count')).toBeNull()
+    expect(body.get('generate_sets')).toBeNull()
   })
 
   it('builds the range-capable audio URL', () => {

@@ -42,7 +42,6 @@ const settings = {
     available_engines: ['parakeet', 'whisper', 'faster_whisper'],
     default_engine: 'parakeet',
   },
-  gen: { blank_count: 10 },
 }
 
 const status = {

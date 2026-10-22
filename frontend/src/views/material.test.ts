@@ -16,7 +16,6 @@ vi.mock('../api', async () => {
       getAttempt: vi.fn(),
       examTypes: vi.fn(),
       audioUrl: vi.fn(() => '/api/materials/m1/audio'),
-      translate: vi.fn(),
     },
   }
 })
@@ -43,7 +42,6 @@ const material = {
   asr_model: 'parakeet',
   words,
   sentences: [[0, 4]] as [number, number][],
-  sets: [],
   created_at: '2026-10-21T10:00:00Z',
   updated_at: '2026-10-21T10:00:00Z',
 }
@@ -94,7 +92,6 @@ async function mountView(path = '/material/m1') {
       { path: '/material/:materialId', component: MaterialView },
       { path: '/paper/:materialId', component: { template: '<div />' } },
       { path: '/paper/:materialId/:paperId', component: { template: '<div />' } },
-      { path: '/practice/:setId', component: { template: '<div />' } },
     ],
   })
   await router.push(path)

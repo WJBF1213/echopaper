@@ -42,10 +42,6 @@ const en: Record<string, string> = {
   'api.httpError': 'Request failed (HTTP {status})',
 
   // --- modes / sources -------------------------------------------------
-  'mode.llm': 'Hybrid (LLM)',
-  'mode.nouns': 'Local rules',
-  'mode.manual': 'Manual',
-  'mode.dictation': 'Full dictation',
   'source.asr': 'Speech recognition',
   'source.aligned': 'Aligned transcript',
   'source.manual': 'Plain text',
@@ -53,14 +49,7 @@ const en: Record<string, string> = {
   // --- library ---------------------------------------------------------
   'library.title': 'Listening cloze practice',
   'library.subtitle.before':
-    'Upload audio or paste a transcript to generate cloze questions. While practising press',
-  'library.subtitle.after': 'to play,',
-  'library.subtitle.afterArrows': 'to skip 5 seconds,',
-  'library.subtitle.end': 'to check answers.',
-  'library.key.space': 'Space',
-  'library.key.left': '←',
-  'library.key.right': '→',
-  'library.key.enter': 'Enter',
+    'Upload audio or paste a transcript to store it in the library; open the material page to pick question types and generate a full paper.',
   'library.batches.title': 'Import history',
   'library.batches.hint': 'Click to view progress',
   'library.batches.done': '{done}/{total} done',
@@ -74,9 +63,9 @@ const en: Record<string, string> = {
   'library.emptyFiltered': 'No materials match “{query}”',
   'library.asr.title': 'Local speech recognition',
   'library.delete.confirm':
-    'Delete “{name}”? Its question sets, attempts, and wrong-word records will be deleted too.',
+    'Delete “{name}”? Its papers, attempts, and wrong-word records will be deleted too.',
   'library.delete.done': 'Deleted',
-  'library.job.done': 'Questions generated',
+  'library.job.done': 'Transcription finished',
   'library.batch.done': 'Batch import finished: {done} materials stored',
   'library.batch.doneWithErrors': 'Batch import finished: {done} succeeded, {error} failed',
 
@@ -89,17 +78,13 @@ const en: Record<string, string> = {
   'form.title': 'New material',
   'form.name': 'Name',
   'form.name.placeholder': 'e.g. Cambridge 18 Test 1 Section 1',
-  'form.mode': 'Question mode',
-  'form.blankCount': 'Questions',
   'form.transcript': 'Transcript (optional)',
-  'form.transcript.placeholderManual':
-    'Paste the transcript and mark answers in [brackets], e.g. My postcode is [GU7 4BX].',
   'form.transcript.placeholderAsr':
-    'Pasting the official transcript improves accuracy; with text only, the browser reads it aloud.',
+    'Pasting the official transcript improves transcription accuracy; a transcript alone has no audio.',
   'form.audioFile': 'Audio file',
   'form.audioUrl': 'or audio URL',
   'form.audioUrl.placeholder': 'https://…/audio.mp3',
-  'form.submit': 'Create & generate',
+  'form.submit': 'Create & transcribe',
   'form.submitting': 'Submitting…',
   'form.more': 'More options',
   'form.less': 'Fewer options',
@@ -110,16 +95,7 @@ const en: Record<string, string> = {
   'form.advanced.model': 'ASR model',
   'form.advanced.modelText':
     'The first run downloads the model; progress appears in the task bar below.',
-  'form.advanced.count': 'Question count',
-  'form.advanced.countText':
-    'Roughly one question per 60–80 words; the system reduces the count when gaps are too small.',
-  'form.mode.llm.hint':
-    'The LLM picks blanks from the transcript and code verifies every span; falls back to local rules without a key.',
-  'form.mode.nouns.hint':
-    'Entirely local: part of speech, word frequency, and phrase structure. No network needed.',
-  'form.mode.manual.hint': 'Mark answers in the text with [brackets], e.g. My postcode is [GU7 4BX].',
   'form.error.needInput': 'Provide an audio file, an audio URL, or a transcript',
-  'form.error.manualNeedsText': 'Manual mode needs a transcript with [bracketed] answers',
   'form.submitted': 'Submitted; processing',
 
   // --- job progress ----------------------------------------------------
@@ -140,10 +116,8 @@ const en: Record<string, string> = {
   'batch.choose': 'Choose audio',
   'batch.summary': '{count} files · {size} MB · transcribed one by one, all saved to the library',
   'batch.remove': 'Remove',
-  'batch.generate': 'Also generate questions after transcription',
-  'batch.mode': 'Mode',
-  'batch.count': 'Questions',
-  'batch.generateOff': 'Transcribe and store only; you can generate questions later from the material page.',
+  'batch.generateOff':
+    'Batch imports only transcribe and store; generate papers later from the material page.',
   'batch.submit': 'Start batch transcription',
   'batch.submitCount': 'Start batch transcription ({n})',
   'batch.submitting': 'Uploading…',
@@ -207,46 +181,6 @@ const en: Record<string, string> = {
     'When audio and transcript are both supplied the transcript is authoritative; ' +
     'ASR only provides word-level timestamps. Editing the transcript realigns it and ' +
     'marks older papers stale.',
-
-  // --- practice --------------------------------------------------------
-  'practice.back': 'Back',
-  'practice.title': 'Practice',
-  'practice.stale': 'Based on older transcript',
-  'practice.stat.correct': 'Correct',
-  'practice.stat.wrong': 'Wrong',
-  'practice.stat.filled': 'Filled',
-  'practice.readTranscript': 'Read transcript',
-  'practice.slow': 'Slow',
-  'practice.ttsHint': 'This material has no audio; the browser reads it aloud.',
-  'practice.hint.timed': 'Click a question number to jump 1.5s before its word and loop the sentence.',
-  'practice.hint.space': 'play/pause',
-  'practice.hint.arrows': 'skip 5 seconds',
-  'practice.hint.enter': 'check answers',
-  'practice.hint.untimed': 'This material has no word timestamps, so question numbers do not jump.',
-  'practice.questions': 'Questions',
-  'practice.dictation': 'Full dictation',
-  'practice.exitDictation': 'Exit dictation',
-  'practice.translate': 'Sentence translation',
-  'practice.translating': 'Translating…',
-  'practice.translateFailed':
-    '{n} sentences failed to translate (needs network or an LLM key)',
-  'practice.instruction.before': 'Complete the notes below. Write',
-  'practice.instruction.after': 'for each answer.',
-  'practice.dictation.score': 'Dictation accuracy {pct}% ({ok}/{total})',
-  'practice.check': 'Check',
-  'practice.checking': 'Checking…',
-  'practice.reveal': 'Show answers',
-  'practice.revealed': 'All answers revealed',
-  'practice.retryWrong': 'Retry wrong',
-  'practice.retryNone': 'No wrong answers',
-  'practice.retryCleared': 'Cleared {n} wrong answers; try again',
-  'practice.reset': 'Clear',
-  'practice.resetConfirm': 'Clear all answers and start over?',
-  'practice.noAnswers': 'Nothing to check',
-  'practice.needDictationInput': 'Fill in at least one blank before checking',
-  'practice.result.allCorrect': 'All correct ({ok}/{total}).',
-  'practice.result.partial':
-    'Correct {ok}/{total} ({pct}%). Edit the red items directly or click “Retry wrong”.',
 
   // --- full paper ------------------------------------------------------
   'paper.open': 'Full paper',
@@ -340,8 +274,6 @@ const en: Record<string, string> = {
   'settings.asr.hint': 'Switching engines releases the current model immediately.',
   'settings.asr.loadedToast': 'ASR model loaded',
   'settings.asr.unloadedToast': 'ASR model unloaded',
-  'settings.defaults.title': 'Defaults',
-  'settings.defaults.blankCount': 'Questions per set',
   'settings.prompts.title': 'Prompts',
   'settings.prompts.hint':
     'Editing a prompt invalidates related LLM cache entries and changes the generation style of future papers. Keep every listed variable when editing.',
@@ -380,7 +312,6 @@ const en: Record<string, string> = {
   'transcript.playFrom': 'Play this sentence from {time}',
   'transcript.playFromWord': 'Play from {time}',
   'blank.aria': 'Question {n}, {limit}',
-  'blank.title': 'Question {n} · {limit}',
 }
 
 export default en

@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   activeWordIndex,
   blankSeekTime,
-  buildDictationBlanks,
   fmtTime,
   hasWordTiming,
   pct,
@@ -78,23 +77,5 @@ describe('word timing helpers', () => {
     expect(activeWordIndex(words, -1)).toBe(-1)
     expect(activeWordIndex([{ s: 2, e: 2.5 }], 0.5)).toBe(-1)
     expect(activeWordIndex(words, 3)).toBe(-1)
-  })
-})
-
-describe('dictation blanks', () => {
-  const words = 'one two three four five six seven'.split(' ').map((w, i) => ({ w, s: i, e: i + 1 }))
-
-  it('keeps sentence anchors and blanks the middle', () => {
-    const blanks = buildDictationBlanks(words, [[0, 3]])
-    expect(blanks.map((b) => b.wordIndex)).toEqual([1, 2])
-  })
-
-  it('skips sentences too short to blank', () => {
-    expect(buildDictationBlanks(words, [[0, 1]])).toEqual([])
-  })
-
-  it('falls back to one range when sentences are missing', () => {
-    const blanks = buildDictationBlanks(words.slice(0, 5), [])
-    expect(blanks.map((b) => b.wordIndex)).toEqual([1, 2, 3])
   })
 })

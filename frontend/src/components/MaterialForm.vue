@@ -1,22 +1,14 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { reactive, ref } from 'vue'
 import { api } from '../api'
 import { showToast } from '../router'
 import { t } from '../i18n'
 import Icon from './Icon.vue'
 
-const modes = computed(() => [
-  { value: 'llm', label: t('mode.llm'), hint: t('form.mode.llm.hint') },
-  { value: 'nouns', label: t('mode.nouns'), hint: t('form.mode.nouns.hint') },
-  { value: 'manual', label: t('mode.manual'), hint: t('form.mode.manual.hint') },
-])
-
 const emit = defineEmits<{ created: [jobId: string] }>()
 
 const form = reactive({
   name: '',
-  mode: 'llm',
-  blankCount: 10,
   transcript: '',
   audioUrl: '',
 })
@@ -34,10 +26,6 @@ async function submit() {
     showToast(t('form.error.needInput'), 'error')
     return
   }
-  if (form.mode === 'manual' && !form.transcript.trim()) {
-    showToast(t('form.error.manualNeedsText'), 'error')
-    return
-  }
   submitting.value = true
   try {
     const { job_id } = await api.createMaterial({
@@ -45,8 +33,6 @@ async function submit() {
       audioFile: file.value,
       audioUrl: form.audioUrl.trim(),
       transcript: form.transcript.trim(),
-      mode: form.mode,
-      blankCount: form.blankCount,
     })
     showToast(t('form.submitted'))
     form.name = ''
@@ -75,25 +61,13 @@ async function submit() {
           :placeholder="t('form.name.placeholder')"
         />
       </label>
-      <label class="field">
-        <span class="tag">{{ t('form.mode') }}</span>
-        <select v-model="form.mode">
-          <option v-for="m in modes" :key="m.value" :value="m.value">{{ m.label }}</option>
-        </select>
-      </label>
-      <label class="field">
-        <span class="tag">{{ t('form.blankCount') }}</span>
-        <input v-model.number="form.blankCount" type="number" min="5" max="40" />
-      </label>
     </div>
 
     <label class="field" style="margin-top: 14px">
       <span class="tag">{{ t('form.transcript') }}</span>
       <textarea
         v-model="form.transcript"
-        :placeholder="form.mode === 'manual'
-          ? t('form.transcript.placeholderManual')
-          : t('form.transcript.placeholderAsr')"
+        :placeholder="t('form.transcript.placeholderAsr')"
       />
     </label>
 
@@ -107,8 +81,6 @@ async function submit() {
         <input v-model="form.audioUrl" type="text" :placeholder="t('form.audioUrl.placeholder')" />
       </label>
     </div>
-
-    <p class="hint" style="margin-top: 12px">{{ modes.find((m) => m.value === form.mode)?.hint }}</p>
 
     <div class="actions">
       <button class="big" type="button" :disabled="submitting" @click="submit">
@@ -128,10 +100,6 @@ async function submit() {
       <div>
         <dt>{{ t('form.advanced.model') }}</dt>
         <dd>{{ t('form.advanced.modelText') }}</dd>
-      </div>
-      <div>
-        <dt>{{ t('form.advanced.count') }}</dt>
-        <dd>{{ t('form.advanced.countText') }}</dd>
       </div>
     </dl>
   </section>

@@ -13,9 +13,6 @@ const ALLOWED_EXTS = new Set([
 
 const files = ref<File[]>([])
 const name = ref('')
-const generateSets = ref(false)
-const mode = ref('nouns')
-const blankCount = ref(10)
 const submitting = ref(false)
 const inputEl = ref<HTMLInputElement | null>(null)
 
@@ -69,9 +66,6 @@ async function submit() {
     const res = await api.createMaterialsBatch({
       files: files.value,
       name: name.value.trim(),
-      generateSets: generateSets.value,
-      mode: mode.value,
-      blankCount: blankCount.value,
     })
     showToast(t('batch.imported', { n: res.jobs.length }))
     files.value = []
@@ -127,26 +121,7 @@ async function submit() {
       <p class="hint">{{ t('batch.summary', { count: files.length, size: totalMb.toFixed(1) }) }}</p>
     </div>
 
-    <div class="options">
-      <label class="check">
-        <input v-model="generateSets" type="checkbox" />
-        {{ t('batch.generate') }}
-      </label>
-      <template v-if="generateSets">
-        <label class="field inline">
-          <span class="tag">{{ t('batch.mode') }}</span>
-          <select v-model="mode">
-            <option value="nouns">{{ t('mode.nouns') }}</option>
-            <option value="llm">{{ t('mode.llm') }}</option>
-          </select>
-        </label>
-        <label class="field inline">
-          <span class="tag">{{ t('batch.count') }}</span>
-          <input v-model.number="blankCount" type="number" min="5" max="40" />
-        </label>
-      </template>
-      <span v-else class="hint">{{ t('batch.generateOff') }}</span>
-    </div>
+    <p class="hint options">{{ t('batch.generateOff') }}</p>
 
     <div class="actions">
       <button class="big" type="button" :disabled="submitting || !files.length" @click="submit">
@@ -207,30 +182,8 @@ async function submit() {
   opacity: 1;
 }
 
-.options {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
+.hint.options {
   margin-top: 14px;
-}
-
-.check {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink-2);
-  font-size: 13px;
-}
-
-.field.inline {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-}
-
-.field.inline input[type='number'] {
-  width: 76px;
 }
 
 .actions {

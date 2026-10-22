@@ -99,7 +99,6 @@ const form = reactive({
   whisperModel: '',
   fasterWhisperModel: '',
   idleUnloadMin: 10,
-  blankCount: 10,
   availableEngines: ['faster_whisper'] as string[],
 })
 
@@ -164,7 +163,6 @@ async function load() {
     form.whisperModel = s.asr.whisper_model
     form.fasterWhisperModel = s.asr.faster_whisper_model
     form.idleUnloadMin = s.asr.idle_unload_min
-    form.blankCount = s.gen.blank_count
     form.availableEngines = s.asr.available_engines ?? ['faster_whisper']
     if (!form.availableEngines.includes(form.engine)) {
       form.engine = s.asr.default_engine ?? form.availableEngines[0]
@@ -200,7 +198,6 @@ async function save() {
         faster_whisper_model: form.fasterWhisperModel,
         idle_unload_min: form.idleUnloadMin,
       },
-      gen: { blank_count: form.blankCount },
     })
     settings.value = updated
     apiKey.value = ''
@@ -355,14 +352,6 @@ onMounted(load)
           <button class="ghost small" type="button" @click="engineAction('unload')">{{ t('settings.asr.unload') }}</button>
           <span class="hint">{{ t('settings.asr.hint') }}</span>
         </div>
-      </section>
-
-      <section class="card">
-        <h2>{{ t('settings.defaults.title') }}</h2>
-        <label class="field" style="max-width: 180px">
-          <span class="tag">{{ t('settings.defaults.blankCount') }}</span>
-          <input v-model.number="form.blankCount" type="number" min="1" max="40" />
-        </label>
       </section>
 
       <section class="card">
