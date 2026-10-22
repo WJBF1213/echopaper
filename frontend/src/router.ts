@@ -18,6 +18,7 @@ const router = createRouter({
   routes: [
     { path: '/', name: 'library', component: () => import('./views/LibraryView.vue') },
     { path: '/material/:materialId', name: 'material', component: () => import('./views/MaterialView.vue') },
+    { path: '/listen/:materialId', name: 'listen', component: () => import('./views/ListenView.vue') },
     { path: '/paper/:materialId', name: 'paper', component: () => import('./views/PaperView.vue') },
     {
       path: '/paper/:materialId/:paperId',

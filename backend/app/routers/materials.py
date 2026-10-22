@@ -200,6 +200,35 @@ def material_detail(material_id: str, request: Request):
     }
 
 
+@router.get("/materials/{material_id}/translations")
+def material_translations(material_id: str, request: Request):
+    """Intensive-listening snapshot (design §7.3): one entry per
+    transcript sentence in audio order, ``dst`` None where the pipeline
+    produced no row (no key / failed channel) so the listen view can
+    show its placeholder without blocking. ``src`` always derives from
+    the current words via the single authoritative §7.1 function."""
+    conn = request.app.state.conn
+    row = _get_material(conn, material_id)
+    words = json.loads(row["words_json"] or "[]")
+    sentences = json.loads(row["sentences_json"] or "[]")
+    snapshot = {
+        r["sentence_index"]: r["dst"]
+        for r in conn.execute(
+            "SELECT sentence_index, dst FROM material_translations"
+            " WHERE material_id=?",
+            (material_id,),
+        )
+    }
+    entries = []
+    for index, (start, end) in enumerate(sentences):
+        entries.append({
+            "index": index,
+            "src": normalize.sentence_text(words, start, end),
+            "dst": snapshot.get(index),
+        })
+    return {"material_id": material_id, "sentences": entries}
+
+
 @router.put("/materials/{material_id}/transcript")
 def put_transcript(material_id: str, body: TranscriptIn, request: Request):
     """Post-edit / paste official transcript: re-align + re-anchor (§6.1).

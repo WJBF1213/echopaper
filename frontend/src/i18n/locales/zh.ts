@@ -97,7 +97,7 @@ const zh: Record<string, string> = {
   'job.queued': '排队',
   'job.downloading': '下载音频',
   'job.transcribing': '语音识别',
-  'job.generating': '生成题目',
+  'job.translating': '转译中',
   'job.done': '完成',
   'job.error': '失败',
   'job.preparing': '准备',
@@ -123,7 +123,7 @@ const zh: Record<string, string> = {
   'batch.progress.stage.queued': '排队',
   'batch.progress.stage.downloading': '下载',
   'batch.progress.stage.transcribing': '识别',
-  'batch.progress.stage.generating': '出题',
+  'batch.progress.stage.translating': '转译',
   'batch.progress.stage.done': '完成',
   'batch.progress.stage.error': '失败',
   'batch.progress.summary': '{done}/{total} 完成',
@@ -291,6 +291,17 @@ const zh: Record<string, string> = {
   'player.abWaitingB': 'A {time} · 再点设 B',
   'player.clearAb': '取消',
   'player.rate': '播放速度',
+
+  // --- listen (intensive listening, §7.3) -------------------------------
+  'listen.open': '精听',
+  'listen.title': '精听练习',
+  'listen.back': '返回材料',
+  'listen.notFound': '材料不存在或已被删除',
+  'listen.empty': '没有转写句子，无法精听。先在材料页完成转写。',
+  'listen.translationUnavailable': '译文不可用',
+  'listen.playSentence': '播放本句',
+  'listen.loopSentence': '单句循环',
+  'listen.loopShortcutHint': '快捷键 L：对当前播放句设为循环',
 
   // --- transcript / blanks ---------------------------------------------
   'transcript.empty': '（无转写）',

@@ -92,6 +92,7 @@ async function mountView(path = '/material/m1') {
       { path: '/material/:materialId', component: MaterialView },
       { path: '/paper/:materialId', component: { template: '<div />' } },
       { path: '/paper/:materialId/:paperId', component: { template: '<div />' } },
+      { path: '/listen/:materialId', component: { template: '<div />' } },
     ],
   })
   await router.push(path)
@@ -172,6 +173,16 @@ describe('MaterialView papers list', () => {
     await btn!.trigger('click')
     await flushPromises()
     expect(wrapper.vm.$router.currentRoute.value.fullPath).toBe('/paper/m1')
+    wrapper.unmount()
+  })
+
+  it('links the intensive-listening entry next to the paper builder', async () => {
+    const wrapper = await mountView()
+    const btn = wrapper.findAll('button').find((b) => b.text().includes('精听'))
+    expect(btn).toBeTruthy()
+    await btn!.trigger('click')
+    await flushPromises()
+    expect(wrapper.vm.$router.currentRoute.value.fullPath).toBe('/listen/m1')
     wrapper.unmount()
   })
 

@@ -295,6 +295,52 @@ def test_material_detail(tmp_db, client):
     assert r404.status_code == 404
 
 
+def test_material_translations_endpoint(tmp_db, client):
+    """GET /materials/{id}/translations (design §7.3): one entry per
+    transcript sentence, dst None where the snapshot has no row (missing
+    translation never blocks the listen view); 404 for unknown ids."""
+    mid = _seed_material(tmp_db)
+    for idx, dst in ((0, "小城堡矗立在河附近。"), (2, "一个安静的村庄坐落在湖边。")):
+        tmp_db.execute(
+            "INSERT INTO material_translations(material_id,sentence_index,"
+            "src,dst,created_at) VALUES(?,?,?,?,?)",
+            (mid, idx, "stale-src", dst, "2026-10-22T00:00:00"),
+        )
+    tmp_db.commit()
+
+    r = client.get(f"/api/materials/{mid}/translations")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["material_id"] == mid
+    assert [s["index"] for s in body["sentences"]] == [0, 1, 2]
+    # src always derives from the current words via the single
+    # authoritative §7.1 function, never from the stale stored copy
+    assert body["sentences"][0]["src"] == (
+        "The little castle stands near the river"
+    )
+    assert body["sentences"][0]["dst"] == "小城堡矗立在河附近。"
+    assert body["sentences"][1]["dst"] is None
+    assert body["sentences"][2]["dst"] == "一个安静的村庄坐落在湖边。"
+
+    assert client.get("/api/materials/nope/translations").status_code == 404
+
+
+def test_material_translations_empty_without_snapshot(tmp_db, client):
+    """A material whose pipeline run had no LLM key: the endpoint answers
+    200 with dst None everywhere (the page is never blocked)."""
+    mid = _seed_material(tmp_db)
+    r = client.get(f"/api/materials/{mid}/translations")
+    assert r.status_code == 200
+    assert r.json()["sentences"] == [
+        {"index": 0, "src": "The little castle stands near the river",
+         "dst": None},
+        {"index": 1, "src": "The tall tower rises above the trees",
+         "dst": None},
+        {"index": 2, "src": "A quiet village sits beside the lake",
+         "dst": None},
+    ]
+
+
 def test_audio_range_206(tmp_db, client, tmp_path):
     audio = tmp_path / "aud.mp3"
     audio.write_bytes(b"ABC")  # 3 bytes

@@ -106,6 +106,25 @@ describe('BatchProgress', () => {
     wrapper.unmount()
   })
 
+  it('labels the translating stage instead of the raw state', () => {
+    const wrapper = mount(BatchProgress, {
+      props: {
+        batch: batch({
+          done: 0,
+          error: 0,
+          running: 1,
+          percent: 35,
+          jobs: [job({ job_id: 'j1', state: 'translating', percent: 35 })],
+        }),
+      },
+    })
+    // A missing mapping falls through to the raw state string.
+    const chip = wrapper.find('.jobrow .chip').text()
+    expect(chip).toContain('转译')
+    expect(chip).not.toContain('translating')
+    wrapper.unmount()
+  })
+
   it('offers an open action only for finished files', () => {
     const wrapper = mount(BatchProgress, {
       props: {

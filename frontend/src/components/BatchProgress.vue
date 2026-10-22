@@ -36,8 +36,8 @@ function label(state: JobState): string {
       return t('batch.progress.stage.downloading')
     case 'transcribing':
       return t('batch.progress.stage.transcribing')
-    case 'generating':
-      return t('batch.progress.stage.generating')
+    case 'translating':
+      return t('batch.progress.stage.translating')
     case 'done':
       return t('batch.progress.stage.done')
     case 'error':

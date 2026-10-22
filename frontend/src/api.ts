@@ -163,11 +163,13 @@ export interface MaterialDetail {
   updated_at: string
 }
 
+/** Pipeline states (design §7.2): queued → downloading → transcribing →
+ * translating → done; the exam 'generating' stage died with §5.3. */
 export type JobState =
   | 'queued'
   | 'downloading'
   | 'transcribing'
-  | 'generating'
+  | 'translating'
   | 'done'
   | 'error'
 
@@ -444,6 +446,20 @@ export interface CreateMaterialInput {
   transcript?: string
 }
 
+/** One row of GET /api/materials/{id}/translations (design §7.3): the
+ * sentence's English text and Chinese translation snapshot; dst is null
+ * when the pipeline produced none (listen view shows a placeholder). */
+export interface SentenceTranslation {
+  index: number
+  src: string
+  dst: string | null
+}
+
+export interface MaterialTranslations {
+  material_id: string
+  sentences: SentenceTranslation[]
+}
+
 export interface CreateBatchInput {
   files: File[]
   name?: string
@@ -495,6 +511,9 @@ export const api = {
     }>('/materials/batch', { method: 'POST', body: form })
   },
   getMaterial: (id: string) => request<MaterialDetail>(`/materials/${id}`),
+  /** Intensive-listening snapshot (§7.3): per-sentence src/dst. */
+  getTranslations: (id: string) =>
+    request<MaterialTranslations>(`/materials/${id}/translations`),
   updateTranscript: (id: string, transcript: string) =>
     request<{
       id: string

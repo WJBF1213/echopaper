@@ -116,6 +116,10 @@ function generatePaper() {
   void router.push(`/paper/${materialId.value}`)
 }
 
+function openListen() {
+  void router.push(`/listen/${materialId.value}`)
+}
+
 async function removePaper(paper: PaperSummary) {
   if (!window.confirm(t('material.papers.deleteConfirm'))) return
   try {
@@ -244,10 +248,17 @@ onMounted(load)
       <section class="card">
         <div class="cardtitle">
           <h2>{{ t('material.papers.title') }}</h2>
-          <button class="big" type="button" @click="generatePaper">
-            <Icon name="spark" :size="14" />
-            {{ t('paper.generate') }}
-          </button>
+          <div class="row">
+            <!-- 精听 entry (design §7.3): parallel to 生成整卷. -->
+            <button class="ghost" type="button" @click="openListen">
+              <Icon name="headphones" :size="14" />
+              {{ t('listen.open') }}
+            </button>
+            <button class="big" type="button" @click="generatePaper">
+              <Icon name="spark" :size="14" />
+              {{ t('paper.generate') }}
+            </button>
+          </div>
         </div>
 
         <div v-if="papers.length" class="papers">

@@ -102,7 +102,7 @@ const en: Record<string, string> = {
   'job.queued': 'Queued',
   'job.downloading': 'Downloading',
   'job.transcribing': 'Transcribing',
-  'job.generating': 'Generating',
+  'job.translating': 'Translating',
   'job.done': 'Done',
   'job.error': 'Failed',
   'job.preparing': 'Preparing',
@@ -129,7 +129,7 @@ const en: Record<string, string> = {
   'batch.progress.stage.queued': 'Queued',
   'batch.progress.stage.downloading': 'Download',
   'batch.progress.stage.transcribing': 'ASR',
-  'batch.progress.stage.generating': 'Questions',
+  'batch.progress.stage.translating': 'Translation',
   'batch.progress.stage.done': 'Done',
   'batch.progress.stage.error': 'Failed',
   'batch.progress.summary': '{done}/{total} done',
@@ -306,6 +306,17 @@ const en: Record<string, string> = {
   'player.abWaitingB': 'A {time} · click to set B',
   'player.clearAb': 'Cancel',
   'player.rate': 'Playback speed',
+
+  // --- listen (intensive listening, §7.3) -------------------------------
+  'listen.open': 'Listen',
+  'listen.title': 'Intensive listening',
+  'listen.back': 'Back to material',
+  'listen.notFound': 'Material not found or deleted',
+  'listen.empty': 'No transcript sentences yet. Finish transcription on the material page first.',
+  'listen.translationUnavailable': 'Translation unavailable',
+  'listen.playSentence': 'Play this sentence',
+  'listen.loopSentence': 'Loop this sentence',
+  'listen.loopShortcutHint': 'Shortcut L: loop the sentence currently playing',
 
   // --- transcript / blanks ---------------------------------------------
   'transcript.empty': '(no transcript)',

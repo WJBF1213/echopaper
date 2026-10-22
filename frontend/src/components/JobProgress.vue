@@ -14,8 +14,8 @@ const stageLabel = computed(() => {
       return t('job.downloading')
     case 'transcribing':
       return t('job.transcribing')
-    case 'generating':
-      return t('job.generating')
+    case 'translating':
+      return t('job.translating')
     case 'done':
       return t('job.done')
     case 'error':
