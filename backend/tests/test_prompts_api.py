@@ -147,3 +147,27 @@ def test_put_unknown_key_404(client):
         "/api/prompts", json={"key": "exam.nope.zh", "text": "随便什么"}
     )
     assert resp.status_code == 404
+
+
+def test_delete_llm_cache(client):
+    """Task 8: DELETE /api/llm-cache wipes the response cache and reports
+    how many rows went away; a second call on an empty table reports 0."""
+    conn = client.app.state.conn
+    for i in range(2):
+        conn.execute(
+            "INSERT INTO llm_cache(cache_key, task, model, response_json,"
+            " prompt_tokens, completion_tokens, cached_tokens, created_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (f"key-{i}", "exam", "glm-4.7-flash", "{}", 1, 2, 0, "2026-01-01"),
+        )
+    conn.commit()
+
+    resp = client.delete("/api/llm-cache")
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": 2}
+
+    # The table is now empty — deleting again removes nothing.
+    resp = client.delete("/api/llm-cache")
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": 0}
+    assert conn.execute("SELECT COUNT(*) FROM llm_cache").fetchone()[0] == 0

@@ -1,6 +1,12 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { api, type AsrStatus, type Settings, type SettingsPatch } from '../api'
+import { computed, onMounted, reactive, ref } from 'vue'
+import {
+  api,
+  type AsrStatus,
+  type PromptEntry,
+  type Settings,
+  type SettingsPatch,
+} from '../api'
 import { showToast } from '../router'
 import { t } from '../i18n'
 import Icon from '../components/Icon.vue'
@@ -12,6 +18,76 @@ const saving = ref(false)
 const testing = ref(false)
 const apiKey = ref('')
 const testMessage = ref('')
+
+// --- prompts (Task 8) -----------------------------------------------------
+const promptEntries = ref<PromptEntry[]>([])
+/** Per-entry editable text; initialized from ``current`` on load. */
+const promptDrafts = reactive<Record<string, string>>({})
+/** Key of the prompt with a PUT in flight (disables its buttons). */
+const savingPrompt = ref<string | null>(null)
+const clearingCache = ref(false)
+
+const promptGroups = computed(() => {
+  const groups: { category: string; entries: PromptEntry[] }[] = []
+  for (const p of promptEntries.value) {
+    let g = groups.find((x) => x.category === p.category)
+    if (!g) {
+      g = { category: p.category, entries: [] }
+      groups.push(g)
+    }
+    g.entries.push(p)
+  }
+  return groups
+})
+
+function variablePrint(entry: PromptEntry): string {
+  return entry.variables.map((v) => `{{${v}}}`).join(' ')
+}
+
+function applyPromptUpdate(updated: PromptEntry) {
+  const i = promptEntries.value.findIndex((p) => p.key === updated.key)
+  if (i >= 0) promptEntries.value[i] = updated
+  promptDrafts[updated.key] = updated.current
+}
+
+async function savePrompt(entry: PromptEntry) {
+  savingPrompt.value = entry.key
+  try {
+    const updated = await api.putPrompt(entry.key, promptDrafts[entry.key] ?? '')
+    applyPromptUpdate(updated)
+    showToast(t('settings.prompts.savedToast'))
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : String(err), 'error')
+  } finally {
+    savingPrompt.value = null
+  }
+}
+
+async function resetPrompt(entry: PromptEntry) {
+  savingPrompt.value = entry.key
+  try {
+    // The PUT contract: empty text = restore the registry default.
+    const updated = await api.putPrompt(entry.key, '')
+    applyPromptUpdate(updated)
+    showToast(t('settings.prompts.resetToast'))
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : String(err), 'error')
+  } finally {
+    savingPrompt.value = null
+  }
+}
+
+async function clearCache() {
+  clearingCache.value = true
+  try {
+    const { deleted } = await api.clearLlmCache()
+    showToast(t('settings.llm.cacheCleared', { n: deleted }))
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : String(err), 'error')
+  } finally {
+    clearingCache.value = false
+  }
+}
 
 const form = reactive({
   provider: 'zhipu',
@@ -70,9 +146,15 @@ function onProviderChange() {
 async function load() {
   loading.value = true
   try {
-    const [s, status] = await Promise.all([api.getSettings(), api.asrStatus()])
+    const [s, status, prompts] = await Promise.all([
+      api.getSettings(),
+      api.asrStatus(),
+      api.listPrompts(),
+    ])
     settings.value = s
     asrStatus.value = status
+    promptEntries.value = prompts
+    for (const p of prompts) promptDrafts[p.key] = p.current
     form.provider = s.llm.provider
     form.baseUrl = s.llm.base_url
     form.model = s.llm.model
@@ -218,6 +300,15 @@ onMounted(load)
             <Icon name="spark" :size="13" />
             {{ testing ? t('settings.llm.testing') : t('settings.llm.test') }}
           </button>
+          <button
+            class="ghost small"
+            type="button"
+            :disabled="clearingCache"
+            @click="clearCache"
+          >
+            <Icon name="trash" :size="13" />
+            {{ clearingCache ? t('settings.llm.cacheClearing') : t('settings.llm.clearCache') }}
+          </button>
           <span class="hint">
             {{ testMessage || t('settings.llm.hint') }}
           </span>
@@ -274,6 +365,53 @@ onMounted(load)
         </label>
       </section>
 
+      <section class="card">
+        <h2>{{ t('settings.prompts.title') }}</h2>
+        <p class="hint">{{ t('settings.prompts.hint') }}</p>
+        <details v-for="g in promptGroups" :key="g.category" class="prompt-group">
+          <summary>
+            <span>{{ t('settings.prompts.category.' + g.category) }}</span>
+            <span class="chip">{{ g.entries.length }}</span>
+          </summary>
+          <div v-for="p in g.entries" :key="p.key" class="prompt-entry">
+            <div class="row head">
+              <strong>{{ p.title }}</strong>
+              <span v-if="p.customized" class="chip warn">
+                {{ t('settings.prompts.customized') }}
+              </span>
+            </div>
+            <p v-if="p.variables.length" class="hint vars">
+              {{ t('settings.prompts.variables', { vars: variablePrint(p) }) }}
+            </p>
+            <textarea
+              v-model="promptDrafts[p.key]"
+              rows="5"
+              :disabled="savingPrompt === p.key"
+            />
+            <div class="row actions">
+              <button
+                class="small"
+                type="button"
+                :disabled="savingPrompt === p.key"
+                @click="savePrompt(p)"
+              >
+                <Icon name="check" :size="12" />
+                {{ t('common.save') }}
+              </button>
+              <button
+                class="ghost small"
+                type="button"
+                :disabled="savingPrompt === p.key"
+                @click="resetPrompt(p)"
+              >
+                <Icon name="refresh" :size="12" />
+                {{ t('settings.prompts.reset') }}
+              </button>
+            </div>
+          </div>
+        </details>
+      </section>
+
       <div class="row">
         <button class="big" type="button" :disabled="saving" @click="save">
           <Icon name="check" :size="14" />
@@ -297,5 +435,49 @@ onMounted(load)
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
+}
+
+.prompt-group {
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  margin-top: 10px;
+}
+
+.prompt-group summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 13px;
+  user-select: none;
+}
+
+.prompt-group summary:hover {
+  color: var(--ink);
+}
+
+.prompt-entry {
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--rule);
+}
+
+.prompt-entry .head strong {
+  font-size: 13px;
+}
+
+.prompt-entry .vars {
+  margin: 4px 0 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.prompt-entry textarea {
+  min-height: 90px;
+  font-size: 12.5px;
+}
+
+.prompt-entry .actions {
+  margin-top: 8px;
 }
 </style>

@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app import i18n
 from app.schemas import PromptPutIn
-from app.services import prompts
+from app.services import llm, prompts
 
 router = APIRouter()
 
@@ -77,3 +77,15 @@ def put_prompt(body: PromptPutIn, request: Request):
         e for e in prompts.list_prompts(conn) if e["key"] == body.key
     )
     return _localized(entry)
+
+
+@router.delete("/llm-cache")
+def delete_llm_cache(request: Request):
+    """Task 8: wipe the exact-match LLM response cache.
+
+    Exposed here (not under /settings) because its main trigger is prompt
+    editing: changed prompts change the cache key, but old rows would still
+    occupy the table until evicted — this gives users an explicit flush.
+    """
+    deleted = llm.clear_llm_cache(request.app.state.conn)
+    return {"deleted": deleted}

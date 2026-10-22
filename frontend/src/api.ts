@@ -92,6 +92,17 @@ export interface GenSettings {
   blank_count: number
 }
 
+/** One prompt-registry entry from GET /api/prompts (title follows locale). */
+export interface PromptEntry {
+  key: string
+  title: string
+  category: string
+  variables: string[]
+  default: string
+  current: string
+  customized: boolean
+}
+
 export interface Settings {
   llm: LlmSettings
   asr: AsrSettings
@@ -391,6 +402,11 @@ export const api = {
       '/settings/test-llm',
       jsonInit('POST', llm ?? {}),
     ),
+
+  listPrompts: () => request<PromptEntry[]>('/prompts'),
+  putPrompt: (key: string, text: string) =>
+    request<PromptEntry>('/prompts', jsonInit('PUT', { key, text })),
+  clearLlmCache: () => request<{ deleted: number }>('/llm-cache', { method: 'DELETE' }),
 
   listMaterials: (q = '') =>
     request<MaterialListItem[]>(`/materials${q ? `?q=${encodeURIComponent(q)}` : ''}`),

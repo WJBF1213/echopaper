@@ -15,6 +15,9 @@ vi.mock('../api', async () => {
       asrLoad: vi.fn(),
       asrUnload: vi.fn(),
       testLlm: vi.fn(),
+      listPrompts: vi.fn(),
+      putPrompt: vi.fn(),
+      clearLlmCache: vi.fn(),
     },
   }
 })
@@ -49,6 +52,36 @@ const status = {
   idle_unload_min: 10,
 }
 
+const promptEntries = [
+  {
+    key: 'exam.system.zh',
+    title: '系统提示 · 中文',
+    category: 'system',
+    variables: [] as string[],
+    default: '默认系统提示',
+    current: '默认系统提示',
+    customized: false,
+  },
+  {
+    key: 'exam.stable_frame.zh',
+    title: '稳定框架 · 中文',
+    category: 'frame',
+    variables: ['transcript', 'candidates'],
+    default: 'T: {{transcript}}\nC: {{candidates}}',
+    current: 'T: {{transcript}}\nC: {{candidates}}',
+    customized: false,
+  },
+  {
+    key: 'exam.rules.form_completion.en',
+    title: 'Rules · Form completion',
+    category: 'rules',
+    variables: ['instruction'],
+    default: 'Default rules {{instruction}}',
+    current: 'My custom rules {{instruction}}',
+    customized: true,
+  },
+]
+
 async function mountView() {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -69,6 +102,18 @@ describe('SettingsView', () => {
       ...settings,
       asr: { ...settings.asr, engine: 'whisper' },
     })
+    // Fresh copies per mount: the view replaces entries in the array it is
+    // handed, and reusing the fixture objects would leak edits across tests.
+    mocked.listPrompts.mockImplementation(async () =>
+      promptEntries.map((p) => ({ ...p, variables: [...p.variables] })),
+    )
+    mocked.putPrompt.mockImplementation(async (_key: string, text: string) => ({
+      ...promptEntries[0],
+      key: _key,
+      current: text || promptEntries[0].default,
+      customized: Boolean(text),
+    }))
+    mocked.clearLlmCache.mockResolvedValue({ deleted: 3 })
   })
 
   it('loads settings and masks the stored key', async () => {
@@ -153,6 +198,83 @@ describe('SettingsView', () => {
     )
     // The key is cleared once stored, so the masked placeholder shows again.
     expect((wrapper.find('input[type="password"]').element as HTMLInputElement).value).toBe('')
+    wrapper.unmount()
+  })
+
+  it('renders the prompts card grouped by category with variables and badges', async () => {
+    const wrapper = await mountView()
+    const text = wrapper.text()
+
+    // Card title + the cache-invalidation hint at the top.
+    expect(text).toContain('提示词')
+    expect(text).toContain('LLM 缓存失效')
+
+    // Entries render with their localized titles, grouped by category.
+    expect(text).toContain('系统提示 · 中文')
+    expect(text).toContain('题型规则')
+
+    // Read-only variable print + the customized badge.
+    expect(text).toContain('{{transcript}} {{candidates}}')
+    expect(text).toContain('{{instruction}}')
+    expect(text).toContain('已自定义')
+
+    // The textarea shows the current text, not the default.
+    const ta = wrapper
+      .findAll('textarea')
+      .find((x) => (x.element as HTMLTextAreaElement).value.includes('My custom rules'))
+    expect(ta).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('saves an edited prompt with the textarea content', async () => {
+    const wrapper = await mountView()
+    const entry = wrapper
+      .findAll('.prompt-entry')
+      .find(
+        (e) =>
+          (e.find('textarea').element as HTMLTextAreaElement).value.includes(
+            'My custom rules',
+          ),
+      )
+    expect(entry).toBeTruthy()
+
+    await entry!.find('textarea').setValue('Rewritten rules {{instruction}}')
+    const saveBtn = entry!.findAll('button').find((b) => b.text() === '保存')
+    await saveBtn!.trigger('click')
+    await flushPromises()
+
+    expect(mocked.putPrompt).toHaveBeenCalledWith(
+      'exam.rules.form_completion.en',
+      'Rewritten rules {{instruction}}',
+    )
+    wrapper.unmount()
+  })
+
+  it('resets a prompt by sending an empty string', async () => {
+    const wrapper = await mountView()
+    const entry = wrapper
+      .findAll('.prompt-entry')
+      .find((e) => e.text().includes('Rules · Form completion'))
+    expect(entry).toBeTruthy()
+
+    const resetBtn = entry!.findAll('button').find((b) => b.text().includes('恢复默认'))
+    await resetBtn!.trigger('click')
+    await flushPromises()
+
+    expect(mocked.putPrompt).toHaveBeenCalledWith('exam.rules.form_completion.en', '')
+    wrapper.unmount()
+  })
+
+  it('clears the LLM cache and toasts the deleted count', async () => {
+    const wrapper = await mountView()
+    const btn = wrapper.findAll('button').find((b) => b.text().includes('清空 LLM 缓存'))
+    expect(btn).toBeTruthy()
+    await btn!.trigger('click')
+    await flushPromises()
+
+    expect(mocked.clearLlmCache).toHaveBeenCalledTimes(1)
+    const { toast } = await import('../router')
+    expect(toast.value?.text).toContain('3')
     wrapper.unmount()
   })
 })
