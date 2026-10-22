@@ -1,10 +1,13 @@
-"""API tests for the question-type registry endpoint (six-key redesign)."""
+"""API tests for the blocks-based paper endpoints (design §5.2)."""
 from __future__ import annotations
+
+import json
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.services.llm import ChatUsage
 
 
 class _FakeEngineManager:
@@ -33,6 +36,56 @@ def client(tmp_db, tmp_path):
         engine_manager=_FakeEngineManager(),
     )
     return TestClient(app)
+
+
+# Doubled to 106 words so the completion min_words floor (80) passes.
+_SEED_TEXTS = [
+    "Good morning I would like to ask about the deposit for the flat.",
+    "The deposit is two hundred and fifty pounds in total.",
+    "You will need to provide a passport and a bank statement.",
+    "The flat is available from the first of September.",
+    "There is a bus stop just outside the building.",
+] * 2
+
+
+def _seed(conn) -> str:
+    from app.services.jobs import _uid, _now
+
+    words = []
+    sentences = []
+    for text in _SEED_TEXTS:
+        start = len(words)
+        for token in text.split():
+            words.append(
+                {"w": token, "s": float(len(words)), "e": len(words) + 0.5,
+                 "p": 0.95}
+            )
+        sentences.append([start, len(words) - 1])
+    mid = _uid()
+    conn.execute(
+        "INSERT INTO materials(id,name,source_type,transcript,transcript_source,"
+        "words_json,sentences_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (mid, "Exam mat", "upload", "\n".join(_SEED_TEXTS), "asr",
+         json.dumps(words), json.dumps(sentences), _now(), _now()),
+    )
+    conn.commit()
+    return mid
+
+
+def _passport_item(words, sentences):
+    start, end = sentences[2]
+    target = "passport".split()
+    tokens = [w["w"].lower() for w in words]
+    for i in range(start, end - len(target) + 2):
+        if tokens[i : i + len(target)] == target:
+            return {
+                "stem": "You will need to provide a ______ and a bank statement.",
+                "i0": i, "i1": i + len(target) - 1,
+                "answer": "passport",
+                "word_limit": "ONE WORD ONLY",
+                "layout": "form",
+            }
+    raise AssertionError("passport not found")
 
 
 def test_exam_types_lists_six_key_registry(client):
@@ -79,12 +132,130 @@ def test_exam_types_lists_six_key_registry(client):
     assert types["completion"]["name"] == "填空题"  # default locale is zh
 
 
-# ----------------------------------------------- T10: restored on blocks API
-# The POST /api/materials/{id}/exam tests (part/preset contract) were
-# temporarily removed with the preset registry in Task 9 (PRESETS /
-# PaperPreset / parts deleted, design §4.2). Task 10 reintroduces
-# generation as the blocks API ({blocks: [{type, count}]}) and restores /
-# rewrites:
-#   - request validation (unknown type, count over max_count, word floor)
-#   - LLM-key requirement
-#   - stub-LLM paper generation + refusal (skipped) handling
+# ------------------------------------------- POST /materials/{id}/exam
+
+
+def test_exam_rejects_unknown_type(client, tmp_db):
+    mid = _seed(tmp_db)
+    res = client.post(
+        f"/api/materials/{mid}/exam",
+        json={"blocks": [{"type": "no_such_type", "count": 3}]},
+    )
+    assert res.status_code == 422
+    assert "no_such_type" in res.text
+
+
+def test_exam_rejects_count_out_of_range(client, tmp_db):
+    mid = _seed(tmp_db)
+    for bad in (0, 11):
+        res = client.post(
+            f"/api/materials/{mid}/exam",
+            json={"blocks": [{"type": "completion", "count": bad}]},
+        )
+        assert res.status_code == 422, (bad, res.text)
+
+
+def test_exam_rejects_empty_and_missing_blocks(client, tmp_db):
+    mid = _seed(tmp_db)
+    res = client.post(f"/api/materials/{mid}/exam", json={"blocks": []})
+    assert res.status_code == 422
+    res = client.post(f"/api/materials/{mid}/exam", json={})
+    assert res.status_code == 422
+
+
+def test_exam_rejects_bad_layout_hint(client, tmp_db):
+    mid = _seed(tmp_db)
+    res = client.post(
+        f"/api/materials/{mid}/exam",
+        json={"blocks": [{"type": "completion", "count": 1}],
+              "layout_hint": "spiral"},
+    )
+    assert res.status_code == 422
+    assert "spiral" in res.text
+
+
+def test_exam_unknown_material_is_404(client, tmp_db):
+    res = client.post(
+        "/api/materials/missing/exam",
+        json={"blocks": [{"type": "completion", "count": 1}]},
+    )
+    assert res.status_code == 404
+
+
+def test_exam_requires_llm_key(client, tmp_db):
+    mid = _seed(tmp_db)
+    res = client.post(
+        f"/api/materials/{mid}/exam",
+        json={"blocks": [{"type": "completion", "count": 1}]},
+    )
+    assert res.status_code == 400
+    assert "key" in res.json()["detail"].lower() or "llm" in res.json()["detail"].lower()
+
+
+def test_exam_generates_paper_with_stub_llm(client, tmp_db, monkeypatch):
+    mid = _seed(tmp_db)
+    row = tmp_db.execute(
+        "SELECT words_json, sentences_json FROM materials WHERE id=?", (mid,)
+    ).fetchone()
+    words = json.loads(row["words_json"])
+    sentences = json.loads(row["sentences_json"])
+
+    # Pretend a key is configured.
+    monkeypatch.setattr(
+        "app.routers.exam.llm_cfg_or_none", lambda _s: {"api_key": "test"}
+    )
+
+    from app.services import exam_gen
+
+    async def fake_cached(conn, cfg, messages, *, task, **kwargs):
+        assert task == "exam:completion"
+        return (
+            {"groups": [{"title": "Housing", "items": [_passport_item(words, sentences)]}]},
+            ChatUsage(prompt_tokens=10, completion_tokens=5, cached_tokens=0),
+            False,
+        )
+
+    monkeypatch.setattr(
+        "app.services.exam_gen.llm.cached_chat_json", fake_cached, raising=False
+    )
+
+    res = client.post(
+        f"/api/materials/{mid}/exam",
+        json={"blocks": [{"type": "completion", "count": 1}]},
+    )
+    assert res.status_code == 200, res.text
+    data = res.json()
+    # Task 10 shape: {paper, skipped}; paper_id arrives with persistence
+    # (Task 14).
+    assert set(data) == {"paper", "skipped"}
+    assert data["skipped"] == []
+    paper = data["paper"]
+    assert paper["material_id"] == mid
+    assert paper["total_items"] == 1
+    item = paper["groups"][0]["items"][0]
+    assert item["stem"].count("______") == 1
+    assert item["word_limit"] == "ONE WORD ONLY"
+    assert item["layout"] == "form"
+    # Group instruction synthesized from the items (design §4.1).
+    assert paper["groups"][0]["instruction"] == (
+        "Complete the form below. Write ONE WORD ONLY for each answer."
+    )
+    assert "part" not in paper and "preset" not in paper
+
+    # layout_hint forces every item's layout; regenerate rides along and
+    # still succeeds (the marker only changes the prompt/cache key).
+    res = client.post(
+        f"/api/materials/{mid}/exam",
+        json={
+            "blocks": [{"type": "completion", "count": 1}],
+            "layout_hint": "notes",
+            "regenerate": True,
+        },
+    )
+    assert res.status_code == 200, res.text
+    paper = res.json()["paper"]
+    assert paper["groups"][0]["items"][0]["layout"] == "notes"
+    assert paper["groups"][0]["instruction"].startswith(
+        "Complete the notes below."
+    )
+    _ = exam_gen

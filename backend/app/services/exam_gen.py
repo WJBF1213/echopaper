@@ -1,31 +1,38 @@
-"""Full IELTS Listening paper generation (experimental).
+"""Blocks-based full paper generation (redesign §4, Task 10).
 
 Unlike ``question_gen`` (which only selects word spans for cloze), this
-module asks the LLM for complete, typed IELTS items grounded in the
+module asks the LLM for complete, typed items grounded in the
 transcript: the LLM must cite a word-index span, and the validator
 checks the quote verbatim.
 
-Task 9 transitional state: the type registry shrank to six keys
-(design §4); the preset/part entry point is disabled until Task 10
-rebuilds generation on the blocks API. The validators, block machinery
-and text filters below are kept for that rewrite.
+The entry point is :func:`generate_paper` with ``blocks=[{type, count}]``
+in user order (design §4.4): the block order is the audio zone order,
+matching keeps one shared option pool, and the finished paper is
+renumbered by earliest evidence. ``completion`` carries a per-item
+``word_limit`` (validated against the answer's actual word count) and a
+per-item ``layout``; the printed group instruction is synthesized from
+the loosest limit in the group with the official wording (§4.1).
 
 Design constraints kept from the existing pipeline:
   * pure stdlib + local services, no framework imports;
-  * every LLM call is stateless (``llm.chat_json`` with a caller-built
-    messages list; prompts come from the Task 5 registry);
+  * every LLM call is stateless and goes through
+    ``llm.cached_chat_json`` (task=``exam:<type>``); prompts come from
+    the Task 5 registry;
   * exam rubrics and greetings are removed before the LLM sees the text,
-    and the first/last content sentence of a part is protected from being
-    blanked -- the exact failure mode of the old span-only prompt.
+    and the first/last content sentence of the material is protected
+    from being blanked -- the exact failure mode of the old span-only
+    prompt.
 """
 from __future__ import annotations
 
+import json
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from app.services import llm, pos, prompts
-from app.services.exam_presets import QuestionType
+from app.services.exam_presets import QUESTION_TYPES, QuestionType
 from app.services.llm import LlmError
 
 MIN_GAP_WORDS = 5
@@ -109,6 +116,125 @@ def _counts_as_number(words_json: list[dict], i0: int, i1: int) -> bool:
 
 class ExamGenError(Exception):
     """Raised when a paper cannot be produced at all."""
+
+
+# ------------------------------------------------------- per-type paper data
+# The six-key registry (design §4.2) carries identity data only; the
+# answer-shape knobs the validators need and the fixed paper
+# instructions live here, keyed off the type / answer kind.
+
+#: Official printed instructions for the fixed-limit types. completion
+#: synthesizes its group instruction from the items' word limits (§4.1).
+_INSTRUCTIONS: dict[str, str] = {
+    "mcq_single": "Choose the correct letter, A, B or C.",
+    "mcq_multi": "Choose TWO letters, A-E.",
+    "matching": "Match each item with the correct option, A-F.",
+    "map_labelling": "Label the map below. Write the correct letter, A-F.",
+    "short_answer": (
+        "Answer the questions below. Write NO MORE THAN THREE WORDS "
+        "for each answer."
+    ),
+}
+
+#: The task-frame instruction shown to the LLM while writing completion
+#: items. The printed line is synthesized after validation; this is the
+#: loosest possible example, so no per-item limit contradicts it.
+_COMPLETION_TASK_INSTRUCTION = (
+    "Complete the notes below. Write NO MORE THAN THREE WORDS "
+    "for each answer."
+)
+
+_GENERIC_INSTRUCTION = "Answer the questions below."
+
+
+def _options_range(qtype: QuestionType) -> tuple[int, int]:
+    """(min, max) printed options per answer kind (legacy registry data)."""
+    return {
+        "option": (3, 3),
+        "option_multi": (5, 5),
+        "matching": (4, 6),
+    }.get(qtype.answer_kind, (0, 0))
+
+
+def _multi_count(qtype: QuestionType) -> int:
+    return 2 if qtype.answer_kind == "option_multi" else 1
+
+
+#: The per-item completion word limits (design §4.1) and the word budget
+#: each one grants. IELTS counts a whole number as one word.
+_WORD_LIMIT_WORDS: dict[str, int] = {
+    "ONE WORD ONLY": 1,
+    "NO MORE THAN TWO WORDS": 2,
+    "NO MORE THAN THREE WORDS": 3,
+}
+SHORT_ANSWER_WORD_LIMIT = "NO MORE THAN THREE WORDS"
+
+
+def _parse_word_limit(raw: Any) -> str | None:
+    """Canonical limit text or None. Tolerates case and the official
+    "AND/OR A NUMBER" suffix; anything else is unparsable."""
+    text = str(raw or "").strip().upper().rstrip(".")
+    text = re.sub(r"\s*AND/OR\s+A\s+NUMBER\s*$", "", text)
+    for canonical in _WORD_LIMIT_WORDS:
+        noun = canonical.replace("NO MORE THAN ", "").replace(" ONLY", "")
+        if text in (canonical, noun):
+            return canonical
+    return None
+
+
+def _limit_for_words(words: int) -> str:
+    for canonical, budget in sorted(
+        _WORD_LIMIT_WORDS.items(), key=lambda kv: kv[1]
+    ):
+        if words <= budget:
+            return canonical
+    return "NO MORE THAN THREE WORDS"
+
+
+#: Official instruction nouns per completion layout (design §4.1: the
+#: layout names the thing being completed; sentence prints plural).
+_LAYOUT_NOUNS: dict[str, str] = {
+    "form": "the form below",
+    "table": "the table below",
+    "notes": "the notes below",
+    "sentence": "the sentences below",
+    "summary": "the summary below",
+    "flowchart": "the flow-chart below",
+}
+DEFAULT_LAYOUT = "notes"
+
+
+def _item_layout(
+    qtype: QuestionType,
+    raw: Mapping,
+    group_layout: str = "",
+    layout_hint: str | None = None,
+) -> str | None:
+    """Resolve a completion item's layout: the forced hint wins, then the
+    item's own suggestion, then the group's, then the generic notes."""
+    if not qtype.layouts:
+        return None
+    if layout_hint:
+        return layout_hint
+    for candidate in (raw.get("layout"), group_layout):
+        text = str(candidate or "").strip().lower()
+        if text in qtype.layouts:
+            return text
+    return DEFAULT_LAYOUT
+
+
+def _group_instruction(qtype: QuestionType, items: list["ExamItem"]) -> str:
+    """The printed instruction for one group (design §4.1)."""
+    if qtype.key == "completion" and items:
+        loosest = max(
+            _WORD_LIMIT_WORDS.get(it.word_limit, 1) for it in items
+        )
+        noun = _LAYOUT_NOUNS.get(items[0].layout or "", "the notes below")
+        return (
+            f"Complete {noun}. Write {_limit_for_words(loosest)} "
+            "for each answer."
+        )
+    return _INSTRUCTIONS.get(qtype.key, _GENERIC_INSTRUCTION)
 
 
 @dataclass
@@ -200,6 +326,8 @@ class ExamItem:
     options: list[str] = field(default_factory=list)
     evidence: list[Evidence] = field(default_factory=list)
     word_limit: str | None = None
+    # Presentation layout (completion only, design §4.1); None elsewhere.
+    layout: str | None = None
     label: str = ""
     alternatives: list[str] = field(default_factory=list)
     group_title: str = ""
@@ -216,6 +344,7 @@ class ExamItem:
             "options": self.options,
             "evidence": [e.to_dict() for e in self.evidence],
             "word_limit": self.word_limit,
+            "layout": self.layout,
             "label": self.label,
             "alternatives": self.alternatives,
             "group_title": self.group_title,
@@ -245,8 +374,6 @@ class ExamGroup:
 @dataclass
 class ExamPaper:
     material_id: str
-    part: int
-    preset: str
     groups: list[ExamGroup] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -257,12 +384,27 @@ class ExamPaper:
     def to_dict(self) -> dict:
         return {
             "material_id": self.material_id,
-            "part": self.part,
-            "preset": self.preset,
             "total_items": self.total_items,
             "warnings": self.warnings,
             "groups": [g.to_dict() for g in self.groups],
         }
+
+
+@dataclass
+class GenerateResult:
+    """What one ``generate_paper`` call produced (design §5.2).
+
+    ``paper`` is the printable paper dict (``ExamPaper.to_dict`` shape).
+    ``skipped`` lists refused blocks ``[{type, reason}]`` (design §4.5);
+    it stays empty until the refusal path lands (Task 11) but the API
+    contract already carries it. ``usage`` records every block-level
+    ``cached_chat_json`` call with its task label and cache-hit flag
+    (Task 7 accounting).
+    """
+
+    paper: dict
+    skipped: list[dict] = field(default_factory=list)
+    usage: list[dict] = field(default_factory=list)
 
 
 # ------------------------------------------------------------- text helpers
@@ -361,6 +503,16 @@ def _covered(i: int, ranges: list[tuple[int, int]]) -> bool:
 
 def _schema_hint(qtype: QuestionType) -> str:
     if qtype.answer_kind == "span":
+        if qtype.key == "completion":
+            # Per-item word_limit + layout (design §4.1); the group may
+            # also suggest one layout for all its items.
+            return (
+                '{"groups":[{"title":"...","layout":"notes",'
+                '"items":[{"stem":"... ______ ...","label":"...",'
+                '"i0":12,"i1":12,"answer":"...",'
+                '"word_limit":"ONE WORD ONLY","layout":"form",'
+                '"reason":"..."}]}]}'
+            )
         return (
             '{"groups":[{"title":"...","items":[{"stem":"... ______ ...",'
             '"label":"...","i0":12,"i1":12,"answer":"...","reason":"..."}]}]}'
@@ -384,13 +536,9 @@ def _schema_hint(qtype: QuestionType) -> str:
 # All prompt texts live in the Task 5 registry (app/services/prompts.py);
 # _build_messages assembles the three-part layout of design §8.1 with the
 # prefix ordered by stability: system (global) -> stable frame (per
-# material: transcript + candidates) -> task frame (per request).
-#
-# Task 9 transitional (until Task 10's blocks API): the six-key registry
-# stores type names as name_zh/name_en (no label dict) and carries no
-# per-type paper instruction — completion composes its instruction from
-# the group's word limits (design §4.1). The blocks API reintroduces
-# per-block instructions; a generic line fills the task frame until then.
+# material: transcript + candidates) -> task frame (per request: type
+# rules, count, JSON schema hint, and -- only for regenerate=True -- the
+# variation marker that busts the local llm_cache key, §8.3).
 
 
 def _type_name(qtype: QuestionType, lang: str) -> str:
@@ -398,16 +546,15 @@ def _type_name(qtype: QuestionType, lang: str) -> str:
     return qtype.name_zh if lang == "zh" else qtype.name_en
 
 
-_GENERIC_INSTRUCTION = "Answer the questions below."
+def _task_instruction(qtype: QuestionType) -> str:
+    """The instruction line shown to the LLM in the task frame."""
+    if qtype.key == "completion":
+        return _COMPLETION_TASK_INSTRUCTION
+    return _INSTRUCTIONS.get(qtype.key, _GENERIC_INSTRUCTION)
 
 
 def _rules_text(conn, qtype: QuestionType, lang: str) -> str:
-    """Per-type rules text from the prompt registry (overrides apply).
-
-    Task 9: every registered type has a registry entry (the six-key swap
-    removed the legacy preset-text fallback), and the new rules texts
-    declare no variables.
-    """
+    """Per-type rules text from the prompt registry (overrides apply)."""
     return prompts.render_prompt(conn, f"exam.rules.{qtype.key}", lang)
 
 
@@ -588,7 +735,21 @@ def _validate_completion(
     qtype: QuestionType,
     allowed: list[tuple[int, int]],
     ctx: ExamContext,
+    group_layout: str = "",
+    layout_hint: str | None = None,
 ) -> tuple[ExamItem | None, str | None]:
+    # Per-item word limit (design §4.1): completion declares it on every
+    # item; short_answer keeps the fixed 3-word limit.
+    if qtype.key == "completion":
+        word_limit = _parse_word_limit(raw.get("word_limit"))
+        if word_limit is None:
+            return None, (
+                f"word_limit 缺失或无法识别：{raw.get('word_limit')!r}"
+            )
+    else:
+        word_limit = SHORT_ANSWER_WORD_LIMIT
+    limit_words = _WORD_LIMIT_WORDS[word_limit]
+
     words = [str(w.get("w", "")) for w in words_json]
     i0, i1 = raw.get("i0"), raw.get("i1", raw.get("i0"))
     if (
@@ -601,12 +762,6 @@ def _validate_completion(
         return None, f"答案索引越界（i0={i0}, i1={i1}）"
     if i1 - i0 + 1 > MAX_SPAN_WORDS:
         return None, f"答案跨度 {i1 - i0 + 1} 词，超过 {MAX_SPAN_WORDS} 词"
-    counted = 1 if _counts_as_number(words_json, i0, i1) else i1 - i0 + 1
-    if counted > qtype.max_words:
-        return None, (
-            f"答案 {i1 - i0 + 1} 词，超过本题型上限 {qtype.max_words} 词"
-            f"（{qtype.word_limit}）"
-        )
 
     given = str(raw.get("answer") or "").strip()
     span_text = _span_text(words_json, i0, i1)
@@ -644,6 +799,14 @@ def _validate_completion(
     answer = _answer_text(words_json, i0, i1)
     if given and _norm(given) != _norm(answer):
         return None, f"答案不是逐字原文：{given!r} != {answer!r}"
+    # The limit is checked against the FINAL answer span (a snapped/shrunk
+    # span can differ from the indices the writer returned), with the
+    # IELTS number rule: a whole number phrase counts as one word.
+    counted = 1 if _counts_as_number(words_json, i0, i1) else i1 - i0 + 1
+    if counted > limit_words:
+        return None, (
+            f"答案 {counted} 词，超过该题 word_limit（{word_limit}）"
+        )
 
     stem = str(raw.get("stem") or "").strip()
     if not stem:
@@ -678,7 +841,8 @@ def _validate_completion(
             stem=stem,
             answer=answer,
             evidence=evidence,
-            word_limit=qtype.word_limit,
+            word_limit=word_limit,
+            layout=_item_layout(qtype, raw, group_layout, layout_hint),
             label=str(raw.get("label") or "").strip(),
             group_title=str(raw.get("group_title") or ""),
         ),
@@ -696,20 +860,17 @@ def _validate_option_item(
     if not stem:
         return None, "缺少题干 stem"
     options = [str(o).strip() for o in (raw.get("options") or []) if str(o).strip()]
-    expected = (
-        qtype.options_min
-        if qtype.options_min == qtype.options_max
-        else None
-    )
+    lo, hi = _options_range(qtype)
+    expected = lo if lo == hi else None
     if expected is not None and len(options) != expected:
         return None, f"选项数 {len(options)}，应为 {expected}"
-    if not (qtype.options_min <= len(options) <= qtype.options_max):
-        return None, f"选项数 {len(options)} 超出 {qtype.options_min}-{qtype.options_max}"
+    if not (lo <= len(options) <= hi):
+        return None, f"选项数 {len(options)} 超出 {lo}-{hi}"
     if len({_norm(o) for o in options}) != len(options):
         return None, "选项重复"
 
     if qtype.answer_kind == "option_multi":
-        answer = _canonical_multi(str(raw.get("answer") or ""), options, qtype.multi_count)
+        answer = _canonical_multi(str(raw.get("answer") or ""), options, _multi_count(qtype))
     else:
         answer = _canonical_option(str(raw.get("answer") or ""), options)
     if answer is None:
@@ -900,6 +1061,7 @@ def _build_messages(
     count: int,
     lang: str,
     shared_options: list[str] | None = None,
+    variation: int | None = None,
 ) -> list[dict]:
     """Three-part message list (design §8.1), ordered by prefix stability.
 
@@ -908,6 +1070,10 @@ def _build_messages(
     task frame (per request: type rules, count, JSON schema hint). The
     texts are the Task 5 registry's verbatim migration of the legacy
     single user message; only the position of the segments changed.
+    ``part`` is the block's 1-based ordinal in the request (the template
+    header slot -- Part is no longer a product concept). ``variation``
+    (regenerate=True) appends a fixed marker line to the task frame so
+    the exact-match llm_cache key changes (design §8.3).
     """
     label = _type_name(qtype, lang)
     candidates = (
@@ -930,6 +1096,20 @@ def _build_messages(
                 "\nUse exactly this option list (do not add, drop or reword "
                 "options); answer must be one of its letters:\n" + listed
             )
+    task_frame = prompts.render_prompt(
+        conn,
+        "exam.task_frame",
+        lang,
+        part=part,
+        label=label,
+        count=count,
+        instruction=_task_instruction(qtype),
+        rules=rules,
+        gap=MIN_GAP_WORDS,
+        schema=_schema_hint(qtype),
+    )
+    if variation is not None:
+        task_frame += f"\nvariation: {variation}"
     return [
         {
             "role": "system",
@@ -945,31 +1125,25 @@ def _build_messages(
                 candidates=candidates,
             ),
         },
-        {
-            "role": "user",
-            "content": prompts.render_prompt(
-                conn,
-                "exam.task_frame",
-                lang,
-                part=part,
-                label=label,
-                count=count,
-                instruction=_GENERIC_INSTRUCTION,
-                rules=rules,
-                gap=MIN_GAP_WORDS,
-                schema=_schema_hint(qtype),
-            ),
-        },
+        {"role": "user", "content": task_frame},
     ]
 
 
 async def _call_group(
     chat,
+    conn,
     llm_cfg: Any,
     messages: list[dict],
-) -> dict:
+    task: str,
+    client=None,
+) -> tuple[dict, Any, bool]:
+    """One block-level cached call; normalizes injected-fake errors.
+
+    ``chat`` follows the :func:`llm.cached_chat_json` contract:
+    ``(conn, cfg, messages, *, task, ...) -> (obj, ChatUsage, from_cache)``.
+    """
     try:
-        return await chat(llm_cfg, messages)
+        return await chat(conn, llm_cfg, messages, task=task, client=client)
     except LlmError:
         raise
     except Exception as exc:  # network layer from an injected fake
@@ -983,28 +1157,36 @@ async def _generate_block(
     *,
     part: int,
     qtype: QuestionType,
-    spec: GroupSpec,
+    count: int,
     llm_cfg: Any,
     lang: str,
     ctx: ExamContext,
     zone: list[tuple[int, int]] | None = None,
     shared_options: list[str] | None = None,
-    chat_json_fn=None,
+    layout_hint: str | None = None,
+    variation: int | None = None,
+    client=None,
+    chat_fn=None,
+    usage: list[dict] | None = None,
 ) -> tuple[list[tuple[str, list[ExamItem], list[str]]], list[str]]:
-    """Generate one preset block (one type, N items) from an audio zone.
+    """Generate one request block (one type, N items) from an audio zone.
 
-    ``zone`` is this block's slice of the part (a preset with several groups
-    partitions the audio in order, so a Part 2 MCQ block comes before the
-    matching block exactly as it does on a real paper). ``shared_options``
-    makes every chunk of a matching block reuse one option pool.
+    ``zone`` is this block's slice of the audio (the blocks' user order is
+    the zone order, design §4.4, so a MCQ block placed first reads the
+    first zone exactly as the user arranged). ``shared_options`` makes every
+    chunk -- and every later block of the same type -- reuse one option
+    pool. ``layout_hint`` forces every completion item's layout (§4.1);
+    ``variation`` (regenerate) appends the cache-busting marker (§8.3).
+    Every LLM call is task-labelled ``exam:<type>`` and lands in ``usage``.
     """
     content = content_ranges(words_json, sentences)
     if not content:
         raise ExamGenError("转写中没有可命题的内容句（可能全是考试指令）")
 
     # The old pipeline's failure mode: blanking the opening/closing sentence.
-    # Protect both edges of the *whole part* from answers; they remain visible
-    # as context for option-based types. A middle zone needs no extra guard.
+    # Protect both edges of the *whole material* from answers; they remain
+    # visible as context for option-based types. A middle zone needs no
+    # extra guard.
     whole_allowed = content[1:-1] if len(content) >= 4 else content
     if not whole_allowed:
         whole_allowed = content
@@ -1018,7 +1200,25 @@ async def _generate_block(
     else:
         allowed = whole_allowed
 
-    chat = chat_json_fn or llm.chat_json
+    chat = chat_fn or llm.cached_chat_json
+    task = f"exam:{qtype.key}"
+    if usage is None:
+        usage = []
+
+    async def call(messages: list[dict]) -> Mapping:
+        obj, call_usage, from_cache = await _call_group(
+            chat, conn, llm_cfg, messages, task, client
+        )
+        usage.append(
+            {
+                "task": task,
+                "prompt_tokens": call_usage.prompt_tokens,
+                "completion_tokens": call_usage.completion_tokens,
+                "cached_tokens": call_usage.cached_tokens,
+                "cached_hit": from_cache,
+            }
+        )
+        return obj
 
     chunks = _pack_ranges(content)
     # Spread a single-pass completion block across the audio instead of letting
@@ -1027,12 +1227,10 @@ async def _generate_block(
     # Matching is deliberately NOT chunked: each chunk would return its own
     # option list, and two lists for one task silently break the answer key
     # (a letter means something different in each pool). One call = one pool.
-    if len(chunks) == 1 and spec.count >= 4 and qtype.answer_kind != "matching":
-        chunks = _split_for_coverage(chunks, 3 if spec.count >= 9 else 2)
-    chunks_allowed = _pack_ranges(allowed, MAX_CHUNK_WORDS)
-    # Allowed ranges must be intersected with the same chunking boundaries.
+    if len(chunks) == 1 and count >= 4 and qtype.answer_kind != "matching":
+        chunks = _split_for_coverage(chunks, 3 if count >= 9 else 2)
     sizes = [sum(e - s + 1 for s, e in chunk) for chunk in chunks]
-    counts = _allocate(spec.count, sizes)
+    counts = _allocate(count, sizes)
 
     results: list[tuple[str, list[ExamItem], list[str]]] = []
     warnings: list[str] = []
@@ -1046,7 +1244,7 @@ async def _generate_block(
             for item in items:
                 # The per-group limit in _validate_response does not cap the
                 # *block*: a retry that returns two groups could overshoot.
-                if sum(len(g) for _t, g, _o in results) + len(kept) >= spec.count:
+                if sum(len(g) for _t, g, _o in results) + len(kept) >= count:
                     break
                 # Completion answers live on a unique span; option and matching
                 # items may legitimately share the sentence that supports them.
@@ -1103,9 +1301,10 @@ async def _generate_block(
             count=quota,
             lang=lang,
             shared_options=local_pool,
+            variation=variation,
         )
         try:
-            obj = await _call_group(chat, llm_cfg, user_messages)
+            obj = await call(user_messages)
         except LlmError as exc:
             warnings.append(f"{qtype.key} 第 {ci + 1} 段 LLM 调用失败：{exc}")
             continue
@@ -1119,6 +1318,7 @@ async def _generate_block(
             quota,
             ctx,
             shared_options=local_pool,
+            layout_hint=layout_hint,
         )
         if local_pool is None and qtype.answer_kind == "matching":
             for _t, _items, chunk_options, _errs in blocks:
@@ -1131,8 +1331,8 @@ async def _generate_block(
     # block is short -- not only after a rejection: the model sometimes just
     # returns fewer items than asked for, with nothing to quote back at it.
     total_valid = sum(len(items) for _t, items, _o in results)
-    if total_valid < spec.count:
-        missing = spec.count - total_valid
+    if total_valid < count:
+        missing = count - total_valid
         rejected = [w for w in warnings if w.startswith("拒绝")]
         # The repair suffix rides on the tail of the task frame (the least
         # stable message), leaving the system + stable-frame prefix intact.
@@ -1146,6 +1346,7 @@ async def _generate_block(
             allowed=allowed,
             count=missing,
             lang=lang,
+            variation=variation,
         )
         retry_messages[-1] = {
             **retry_messages[-1],
@@ -1161,7 +1362,7 @@ async def _generate_block(
             "不要重复上一轮已经通过的答案。",
         }
         try:
-            obj = await _call_group(chat, llm_cfg, retry_messages)
+            obj = await call(retry_messages)
             accept(
                 _validate_response(
                     obj,
@@ -1172,6 +1373,7 @@ async def _generate_block(
                     missing,
                     ctx,
                     shared_options=local_pool,
+                    layout_hint=layout_hint,
                 )
             )
         except LlmError:
@@ -1179,7 +1381,7 @@ async def _generate_block(
 
     # Deterministic top-up: a paper must come back with the advertised count.
     total_valid = sum(len(items) for _t, items, _o in results)
-    if total_valid < spec.count and qtype.answer_kind == "span":
+    if total_valid < count and qtype.answer_kind == "span":
         existing = [it for _t, items, _o in results for it in items]
         filler = _top_up_from_candidates(
             words_json,
@@ -1188,7 +1390,8 @@ async def _generate_block(
             allowed,
             ctx,
             existing,
-            spec.count - total_valid,
+            count - total_valid,
+            layout_hint=layout_hint,
         )
         if filler:
             results.append(("", filler, []))
@@ -1227,11 +1430,15 @@ def _top_up_from_candidates(
     ctx: ExamContext,
     have: list[ExamItem],
     need: int,
+    layout_hint: str | None = None,
 ) -> list[ExamItem]:
     """Deterministically fill a shortfall from the POS candidate pool.
 
     The LLM is preferred, but a paper must not silently come back short:
-    matching IELTS delivery needs exactly the advertised item count.
+    matching IELTS delivery needs exactly the advertised item count. Each
+    filler item carries a word_limit fitted to its own answer's actual
+    word count (§4.1; a number phrase counts as one word) and the same
+    layout rules as LLM items.
     """
     if need <= 0 or qtype.answer_kind != "span":
         return []
@@ -1256,7 +1463,8 @@ def _top_up_from_candidates(
             continue
         if _unfair_name_answer(ctx, i0, i1):
             continue
-        if i1 - i0 + 1 > qtype.max_words and not _counts_as_number(words_json, i0, i1):
+        counted = 1 if _counts_as_number(words_json, i0, i1) else i1 - i0 + 1
+        if i1 - i0 + 1 > MAX_SPAN_WORDS:
             continue
         if any(s <= i1 and i0 <= e for s, e in taken_spans):
             continue
@@ -1276,6 +1484,10 @@ def _top_up_from_candidates(
             continue
         if _norm(answer) in _norm(_BLANK_RE.sub(" ", stem)):
             continue
+        if qtype.key == "short_answer":
+            word_limit = SHORT_ANSWER_WORD_LIMIT
+        else:
+            word_limit = _limit_for_words(counted)
         picked.append(
             ExamItem(
                 number=0,
@@ -1291,7 +1503,8 @@ def _top_up_from_candidates(
                         t_end=float(words_json[i1].get("e", 0.0) or 0.0),
                     )
                 ],
-                word_limit=qtype.word_limit,
+                word_limit=word_limit,
+                layout=(layout_hint or DEFAULT_LAYOUT) if qtype.layouts else None,
                 label=str(cand.get("type", "")),
                 alternatives=list(cand.get("alternatives") or []),
             )
@@ -1389,16 +1602,19 @@ def _validate_response(
     limit: int,
     ctx: ExamContext,
     shared_options: list[str] | None = None,
+    layout_hint: str | None = None,
 ) -> list[tuple[str, list[ExamItem], list[str], list[str]]]:
     """Validate one LLM response; returns ``[(title, items, options, warnings)]``."""
     groups = obj.get("groups")
     if not isinstance(groups, list):
         return [("", [], [], ["拒绝：LLM 未返回 groups 数组"])]
     out: list[tuple[str, list[ExamItem], list[str], list[str]]] = []
+    lo, hi = _options_range(qtype)
     for group in groups:
         if not isinstance(group, Mapping):
             continue
         title = str(group.get("title") or "")
+        group_layout = str(group.get("layout") or "").strip().lower()
         raw_items = group.get("items")
         if not isinstance(raw_items, list):
             continue
@@ -1418,10 +1634,9 @@ def _validate_response(
                     for o in (group.get("options") or [])
                     if str(o).strip()
                 ]
-            if not (qtype.options_min <= len(options) <= qtype.options_max):
+            if not (lo <= len(options) <= hi):
                 warnings.append(
-                    f"拒绝：匹配选项数 {len(options)} 超出 "
-                    f"{qtype.options_min}-{qtype.options_max}"
+                    f"拒绝：匹配选项数 {len(options)} 超出 " f"{lo}-{hi}"
                 )
                 out.append((title, [], options, warnings))
                 continue
@@ -1464,7 +1679,8 @@ def _validate_response(
                 if not isinstance(raw, Mapping):
                     continue
                 item, err = _validate_completion(
-                    raw, words_json, sentences, qtype, allowed, ctx
+                    raw, words_json, sentences, qtype, allowed, ctx,
+                    group_layout=group_layout, layout_hint=layout_hint,
                 )
                 if err:
                     warnings.append(f"拒绝：{err}")
@@ -1489,30 +1705,219 @@ def _validate_response(
     return out
 
 
+def _paper_count(conn, material_id: str) -> int:
+    """Existing persisted papers for this material (regenerate marker).
+
+    The ``papers`` table lands with persistence (Task 14); until then (or
+    for ad-hoc connections without it) the count is zero, so the first
+    regenerate marker is ``variation: 1``.
+    """
+    if conn is None or not material_id:
+        return 0
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM papers WHERE material_id=?",
+            (material_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row["n"]) if row is not None else 0
+
+
+def _material_words(material: Mapping) -> list[dict]:
+    raw = material.get("words_json") or []
+    if isinstance(raw, str):
+        raw = json.loads(raw or "[]")
+    return [w for w in raw if isinstance(w, dict)] if isinstance(raw, list) else []
+
+
+def _material_sentences(material: Mapping) -> list[list[int]]:
+    raw = material.get("sentences_json") or []
+    if isinstance(raw, str):
+        raw = json.loads(raw or "[]")
+    return raw if isinstance(raw, list) else []
+
+
+def _parse_blocks(blocks) -> list[tuple[QuestionType, int]]:
+    """Validate ``[{type, count}]`` against the registry (design §4.4)."""
+    if not isinstance(blocks, list) or not blocks:
+        raise ExamGenError("blocks 不能为空：至少需要一个 {type, count} 块")
+    specs: list[tuple[QuestionType, int]] = []
+    for raw in blocks:
+        if not isinstance(raw, Mapping):
+            raise ExamGenError(f"block 不是对象：{raw!r}")
+        qtype = QUESTION_TYPES.get(str(raw.get("type") or ""))
+        if qtype is None:
+            known = ", ".join(sorted(QUESTION_TYPES))
+            raise ExamGenError(
+                f"未知题型 {raw.get('type')!r}；可用题型：{known}"
+            )
+        count = raw.get("count")
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or not (1 <= count <= qtype.max_count)
+        ):
+            raise ExamGenError(
+                f"题型 {qtype.key} 的题数必须是 1 到 {qtype.max_count} 的整数"
+            )
+        specs.append((qtype, count))
+    return specs
+
+
 async def generate_paper(
     conn,
-    words_json: list[dict],
-    sentences: list[list[int]],
+    material: Mapping,
+    blocks: list[dict],
+    cfg: Any,
     *,
-    part: int,
-    preset: str | None = None,
-    llm_cfg: Any,
-    material_id: str = "",
     lang: str = "zh",
-    chat_json_fn=None,
-) -> ExamPaper:
-    """T9 transitional: disabled until Task 10 rebuilds generation.
+    layout_hint: str | None = None,
+    regenerate: bool = False,
+    client=None,
+    chat_fn=None,
+) -> GenerateResult:
+    """Generate one paper from ``blocks=[{type, count}]`` in user order.
 
-    The part/preset contract this entry point resolved (``preset`` ->
-    ``PaperPreset`` -> per-group ``GroupSpec``) was deleted with the
-    six-key registry swap (design §4.2). Task 10 rebuilds generation on
-    the blocks API (``blocks: [{type, count}]`` with audio zoned in user
-    order, design §4.4) and reintroduces the entry point; the validators
-    and block helpers above (``_generate_block``, ``_validate_response``,
-    ``_top_up_from_candidates``, ...) are kept for that rewrite, with the
-    per-type knobs (word_limit / options_min / multi_count) resurfacing
-    as per-block or per-answer-kind data.
+    The block order is the audio zone order (design §4.4): each block is
+    generated from its own consecutive slice of the content, in the order
+    the user arranged them. Matching blocks never split their option pool;
+    the whole paper is renumbered by earliest evidence. ``layout_hint``
+    forces every completion item's layout (§4.1). ``regenerate=True``
+    appends ``variation: <paper count + 1>`` to every task frame so the
+    exact-match ``llm_cache`` key changes and the call produces fresh
+    items (§8.3). ``chat_fn`` is the test seam for
+    :func:`llm.cached_chat_json`.
     """
-    raise ExamGenError(
-        "试卷生成正在按 blocks API 重写（Task 10），暂不可用"
-    )
+    material_id = str(material.get("id") or "")
+    words_json = _material_words(material)
+    sentences = _material_sentences(material)
+    if not words_json:
+        raise ExamGenError("材料没有词表，无法出题")
+    if cfg is None:
+        raise ExamGenError("未配置 LLM，无法生成完整题型")
+    specs = _parse_blocks(blocks)
+    if layout_hint is not None and layout_hint not in (
+        QUESTION_TYPES["completion"].layouts
+    ):
+        raise ExamGenError(
+            f"未知 layout {layout_hint!r}；可用："
+            + ", ".join(QUESTION_TYPES["completion"].layouts)
+        )
+
+    variation = _paper_count(conn, material_id) + 1 if regenerate else None
+
+    paper = ExamPaper(material_id=material_id)
+    usage: list[dict] = []
+    skipped: list[dict] = []
+    ctx = build_context(words_json, sentences)
+
+    # Deterministic prechecks (design §4.5), no LLM call spent:
+    #   * visual types wait for the scene path (§4.3, later task);
+    #   * a transcript under the type's min_words floor cannot feed it.
+    active: list[tuple[QuestionType, int]] = []
+    for qtype, count in specs:
+        if qtype.generates_visual:
+            paper.warnings.append(
+                f"{_type_name(qtype, lang)}需要场景还原"
+                f"（地图场景随后续任务开放），本次已跳过"
+            )
+            continue
+        if len(words_json) < qtype.min_words:
+            paper.warnings.append(
+                f"{_type_name(qtype, lang)}需要至少 {qtype.min_words} 词的转写"
+                f"（当前 {len(words_json)} 词），本次已跳过"
+            )
+            continue
+        active.append((qtype, count))
+    if not active:
+        raise ExamGenError(
+            "没有可生成的题型块：" + "；".join(paper.warnings)
+        )
+
+    content = content_ranges(words_json, sentences)
+    if not content:
+        raise ExamGenError("转写中没有可命题的内容句（可能全是考试指令）")
+
+    # Zone the audio in block order: block 1 reads the first slice, block 2
+    # the second, and so on -- a two-block paper looks like a real paper's
+    # task change instead of two blocks interleaving over the same audio.
+    zones: list[list[tuple[int, int]] | None]
+    if len(active) > 1:
+        per = max(1, len(content) // len(active))
+        zones = []
+        for i in range(len(active)):
+            start = i * per
+            end = len(content) if i == len(active) - 1 else (i + 1) * per
+            zones.append(content[start:end] or content[-1:])
+    else:
+        zones = [None]
+
+    shared_pool_by_type: dict[str, list[str]] = {}
+    for ordinal, ((qtype, count), zone) in enumerate(zip(active, zones), start=1):
+        shared = (
+            shared_pool_by_type.get(qtype.key)
+            if qtype.answer_kind == "matching"
+            else None
+        )
+        try:
+            blocks_out, block_warnings = await _generate_block(
+                conn,
+                words_json,
+                sentences,
+                part=ordinal,
+                qtype=qtype,
+                count=count,
+                llm_cfg=cfg,
+                lang=lang,
+                ctx=ctx,
+                zone=zone,
+                shared_options=shared,
+                layout_hint=layout_hint,
+                variation=variation,
+                client=client,
+                chat_fn=chat_fn,
+                usage=usage,
+            )
+        except ExamGenError as exc:
+            paper.warnings.append(str(exc))
+            continue
+        paper.warnings.extend(block_warnings)
+
+        if qtype.answer_kind == "matching" and qtype.key not in shared_pool_by_type:
+            for _t, _items, options in blocks_out:
+                if options:
+                    shared_pool_by_type[qtype.key] = list(options)
+                    break
+
+        for title, items, options in blocks_out:
+            if not items:
+                continue
+            paper.groups.append(
+                ExamGroup(
+                    type_key=qtype.key,
+                    title=title or _type_name(qtype, lang),
+                    instruction=_group_instruction(qtype, items),
+                    items=items,
+                    options=_letter_pool(options) if options else [],
+                )
+            )
+
+    # Number the whole paper in audio order. Blocks are zoned so their items
+    # follow the block order, but if a block's items are heard earlier they
+    # must print earlier too -- otherwise the numbering contradicts the audio.
+    def earliest(group: ExamGroup) -> int:
+        times = [it.evidence[0].i0 for it in group.items if it.evidence]
+        return min(times) if times else 1 << 30
+
+    paper.groups.sort(key=earliest)
+    number = 1
+    for item in (it for group in paper.groups for it in group.items):
+        item.number = number
+        number += 1
+
+    if paper.total_items == 0:
+        raise ExamGenError(
+            "没有生成任何可用题目；请检查转写内容或 LLM 返回"
+        )
+    return GenerateResult(paper=paper.to_dict(), skipped=skipped, usage=usage)

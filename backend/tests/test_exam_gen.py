@@ -1,21 +1,28 @@
-"""Tests for the experimental full exam-paper generator.
+"""Tests for the blocks-based paper generator (design §4, Task 10).
 
-Task 9 narrowed this file to the subset that does not depend on the
-deleted preset/part contract (see the T10 marker at the bottom).
+``generate_paper`` takes ``blocks=[{type, count}]`` in user order: the
+order is the zone order, matching keeps one shared option pool, and the
+whole paper is renumbered by earliest evidence. completion carries a
+per-item ``word_limit`` (validated against the actual answer's word
+count) and a per-item ``layout``; the printed group instruction is
+synthesized from the loosest limit in the group (design §4.1).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
 from app.services import exam_gen
 from app.services.exam_gen import (
+    GenerateResult,
     content_ranges,
     generate_paper,
     is_rubric,
 )
 from app.services.exam_presets import QUESTION_TYPES
+from app.services.llm import ChatUsage
 
 
 SENTENCES = [
@@ -28,6 +35,8 @@ SENTENCES = [
     "That is the end of part two. You now have ten minutes to check your answers.",
     "Thank you very much. Goodbye.",
 ]
+# 170 words: clears every type's min_words floor (matching 150, mcq 120).
+LONG = SENTENCES * 2
 
 
 def make_material(sentences: list[str]):
@@ -43,8 +52,47 @@ def make_material(sentences: list[str]):
     return words, ranges
 
 
+def as_material(words: list[dict], ranges: list[list[int]], mid: str = "m1") -> dict:
+    return {
+        "id": mid,
+        "words_json": json.dumps(words),
+        "sentences_json": json.dumps(ranges),
+    }
+
+
+def find_span(words: list[dict], text: str, occurrence: int = 1) -> tuple[int, int]:
+    target = text.lower().split()
+    tokens = [w["w"].lower().strip(".,!?;:") for w in words]
+    seen = 0
+    for i in range(len(tokens) - len(target) + 1):
+        if tokens[i : i + len(target)] == target:
+            seen += 1
+            if seen == occurrence:
+                return i, i + len(target) - 1
+    raise AssertionError(f"span not found (occurrence {occurrence}): {text}")
+
+
 def sentence_text(words: list[dict], s: int, e: int) -> str:
     return " ".join(w["w"] for w in words[s : e + 1])
+
+
+def fake_cached_chat(responses, capture=None):
+    """Async stub shaped like ``llm.cached_chat_json`` (3-tuple return).
+
+    Each ``responses`` entry is a response dict (default usage, cache
+    miss) or an explicit ``(obj, ChatUsage, from_cache)`` tuple. Calls
+    past the end of the list get an empty groups object so the retry
+    round terminates.
+    """
+    async def _chat(conn, cfg, messages, *, task, **kwargs):
+        if capture is not None:
+            capture.append({"task": task, "messages": [dict(m) for m in messages]})
+        item = responses.pop(0) if responses else {"groups": []}
+        if isinstance(item, tuple):
+            return item
+        return item, ChatUsage(prompt_tokens=10, completion_tokens=5, cached_tokens=0), False
+
+    return _chat
 
 
 def run(coro):
@@ -150,27 +198,707 @@ def test_rules_override_changes_task_frame(tmp_db):
     assert "覆盖-MCQ规则" in messages[2]["content"]
 
 
-def test_generate_paper_pending_blocks_api(tmp_db):
-    """T9 transitional: the preset/part entry point refuses until Task 10
-    rebuilds generation on the blocks API."""
+# ------------------------------------------------- blocks API (design §4.4)
+
+
+def test_blocks_two_types_generate_ordered_zones(tmp_db):
+    """Two blocks in user order: block 1 reads the first audio zone, block 2
+    the second; groups keep block order, the paper is numbered 1..N, and
+    matching prints one letter-prefixed option pool."""
+    words, ranges = make_material(LONG)
+    two_hundred = find_span(words, "two hundred")
+    passport = find_span(words, "passport")
+    two_hundred_2 = find_span(words, "two hundred", 2)
+    passport_2 = find_span(words, "passport", 2)
+    september_2 = find_span(words, "September", 2)
+
+    mcq = {"groups": [{"title": "Housing", "items": [
+        {
+            "stem": "How much is the deposit?",
+            "options": ["One hundred pounds", "Two hundred pounds",
+                        "Three hundred pounds"],
+            "answer": "Two hundred pounds",
+            "evidence": [{"i0": two_hundred[0], "i1": two_hundred[1]}],
+        },
+        {
+            "stem": "What must you provide?",
+            "options": ["A passport", "A visa", "A driving licence"],
+            "answer": "A",
+            "evidence": [{"i0": passport[0], "i1": passport[1]}],
+        },
+    ]}]}
+    matching = {"groups": [{"title": "Facilities", "options": [
+        "Deposit", "Passport", "September", "Bus stop",
+    ], "items": [
+        {"stem": "Which amount is due?", "answer": "A",
+         "evidence": [{"i0": two_hundred_2[0], "i1": two_hundred_2[1]}]},
+        {"stem": "Which document?", "answer": "B",
+         "evidence": [{"i0": passport_2[0], "i1": passport_2[1]}]},
+        {"stem": "Which month?", "answer": "C",
+         "evidence": [{"i0": september_2[0], "i1": september_2[1]}]},
+    ]}]}
+
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "mcq_single", "count": 2}, {"type": "matching", "count": 3}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([mcq, matching]),
+    ))
+    assert isinstance(result, GenerateResult)
+    assert result.skipped == []
+
+    groups = result.paper["groups"]
+    assert [g["type"] for g in groups] == ["mcq_single", "matching"]
+    assert groups[0]["title"] == "Housing"
+    assert groups[0]["instruction"] == "Choose the correct letter, A, B or C."
+    assert groups[1]["instruction"] == "Match each item with the correct option, A-F."
+    assert groups[1]["options"] == [
+        "A. Deposit", "B. Passport", "C. September", "D. Bus stop",
+    ]
+    mcq_items = groups[0]["items"]
+    assert [i["answer"] for i in mcq_items] == ["B", "A"]
+    # Block 1 items are all heard before block 2 items (zones).
+    first_block_end = mcq_items[-1]["evidence"][0]["i1"]
+    assert all(
+        it["evidence"][0]["i0"] > first_block_end for it in groups[1]["items"]
+    )
+    numbers = [it["number"] for g in groups for it in g["items"]]
+    assert numbers == [1, 2, 3, 4, 5]
+    assert result.paper["total_items"] == 5
+
+    # Part/preset are gone from the paper shape (design §4.2).
+    assert "part" not in result.paper
+    assert "preset" not in result.paper
+
+    # Every block-level LLM call is task-labelled and cached (Task 7 seam).
+    assert [u["task"] for u in result.usage] == [
+        "exam:mcq_single", "exam:matching",
+    ]
+
+
+def test_completion_word_limit_checked_against_answer(tmp_db):
+    """The declared word_limit is validated against the answer's actual word
+    count; a number phrase counts as one word (design §4.1)."""
+    words, ranges = make_material(LONG)
+    bank = find_span(words, "bank statement")
+    two_hundred = find_span(words, "two hundred")
+    september = find_span(words, "September")
+
+    response = {"groups": [{"title": "Housing", "layout": "notes", "items": [
+        # Declared ONE WORD ONLY but the answer is two words -> rejected.
+        {"stem": "You will need to provide a passport and a ______.",
+         "i0": bank[0], "i1": bank[1], "answer": "bank statement",
+         "word_limit": "ONE WORD ONLY"},
+        # Same answer under a two-word limit -> accepted (normalized).
+        {"stem": "You will need to provide a passport and a ______.",
+         "i0": bank[0], "i1": bank[1], "answer": "bank statement",
+         "word_limit": "no more than two words"},
+        # A spelled number counts as one word even under ONE WORD ONLY.
+        {"stem": "The deposit is ______ in total.",
+         "i0": two_hundred[0], "i1": two_hundred[1], "answer": "two hundred",
+         "word_limit": "ONE WORD ONLY"},
+        {"stem": "The flat is available from the first of ______.",
+         "i0": september[0], "i1": september[1], "answer": "September",
+         "word_limit": "NO MORE THAN THREE WORDS"},
+    ]}]}
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 3}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response]),
+    ))
+    items = result.paper["groups"][0]["items"]
+    assert [i["answer"] for i in items] == [
+        "two hundred", "bank statement", "September",
+    ]
+    assert [i["word_limit"] for i in items] == [
+        "ONE WORD ONLY", "NO MORE THAN TWO WORDS", "NO MORE THAN THREE WORDS",
+    ]
+    # The over-limit item was refused, not silently kept.
+    assert any("word_limit" in w for w in result.paper["warnings"])
+
+
+def test_completion_word_limit_required_and_parsable(tmp_db):
+    words, ranges = make_material(LONG)
+    september = find_span(words, "September")
+    response = {"groups": [{"items": [
+        {"stem": "The flat is available from the first of ______.",
+         "i0": september[0], "i1": september[1], "answer": "September"},
+
+    ]}]}
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 1}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([
+            response,
+            {"groups": [{"items": [
+                {"stem": "The flat is available from the first of ______.",
+                 "i0": september[0], "i1": september[1], "answer": "September",
+                 "word_limit": "ABOUT TEN WORDS", "layout": "notes"},
+            ]}]},
+        ]),
+    ))
+    # Both the missing and the unrecognized limit are refused; the
+    # deterministic top-up fills the quota instead.
+    assert any("word_limit" in w for w in result.paper["warnings"])
+
+
+def test_completion_layout_passthrough_and_hint_override(tmp_db):
+    """Item-level layout wins over the group's; layout_hint forces every
+    completion item; unknown layouts fall back to notes."""
+    words, ranges = make_material(LONG)
+    two_hundred = find_span(words, "two hundred")
+    september = find_span(words, "September")
+
+    def item(span, answer, stem, layout=None):
+        it = {"stem": stem, "i0": span[0], "i1": span[1], "answer": answer,
+              "word_limit": "NO MORE THAN TWO WORDS"}
+        if layout:
+            it["layout"] = layout
+        return it
+
+    response = {"groups": [{"title": "Housing", "layout": "form", "items": [
+        item(two_hundred, "two hundred", "The deposit is ______ in total.",
+             layout="table"),
+        item(september, "September",
+             "The flat is available from the first of ______."),
+    ]}]}
+    material = as_material(words, ranges)
+
+    result = run(generate_paper(
+        tmp_db, material, [{"type": "completion", "count": 2}],
+        {"api_key": "test"}, lang="zh", chat_fn=fake_cached_chat([response]),
+    ))
+    items = result.paper["groups"][0]["items"]
+    assert [i["layout"] for i in items] == ["table", "form"]
+    # Instruction noun follows the first item's layout.
+    assert result.paper["groups"][0]["instruction"].startswith(
+        "Complete the table below."
+    )
+
+    # layout_hint overrides every completion item (design §4.1).
+    result = run(generate_paper(
+        tmp_db, material, [{"type": "completion", "count": 2}],
+        {"api_key": "test"}, lang="zh", layout_hint="notes",
+        chat_fn=fake_cached_chat([response]),
+    ))
+    items = result.paper["groups"][0]["items"]
+    assert [i["layout"] for i in items] == ["notes", "notes"]
+    assert result.paper["groups"][0]["instruction"].startswith(
+        "Complete the notes below."
+    )
+
+    # An unrecognized layout suggestion falls back to the generic notes.
+    bogus = {"groups": [{"items": [
+        item(september, "September",
+             "The flat is available from the first of ______.", layout="mind-map"),
+    ]}]}
+    result = run(generate_paper(
+        tmp_db, material, [{"type": "completion", "count": 1}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([bogus, {"groups": []}]),
+    ))
+    layouts = [i["layout"] for g in result.paper["groups"] for i in g["items"]]
+    assert all(l == "notes" for l in layouts)
+
+
+def test_completion_instruction_synthesized_from_loosest_limit(tmp_db):
+    """The group instruction uses the loosest word_limit in the group and
+    the layout's official noun (design §4.1)."""
+    words, ranges = make_material(LONG)
+    two_hundred = find_span(words, "two hundred")
+    september = find_span(words, "September")
+    bank = find_span(words, "bank statement")
+
+    def response(limits, layout):
+        spans = [two_hundred, september, bank][: len(limits)]
+        stems = [
+            "The deposit is ______ in total.",
+            "The flat is available from the first of ______.",
+            "You will need to provide a passport and a ______.",
+        ]
+        return {"groups": [{"layout": layout, "items": [
+            {"stem": stems[i], "i0": s[0], "i1": s[1],
+             "answer": " ".join(w["w"] for w in words[s[0]: s[1] + 1]),
+             "word_limit": lim, "layout": layout}
+            for i, (s, lim) in enumerate(zip(spans, limits))
+        ]}]}
+
+    material = as_material(words, ranges)
+
+    result = run(generate_paper(
+        tmp_db, material, [{"type": "completion", "count": 2}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response(
+            ["ONE WORD ONLY", "NO MORE THAN THREE WORDS"], "notes")]),
+    ))
+    assert result.paper["groups"][0]["instruction"] == (
+        "Complete the notes below. Write NO MORE THAN THREE WORDS "
+        "for each answer."
+    )
+
+    result = run(generate_paper(
+        tmp_db, material, [{"type": "completion", "count": 2}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response(
+            ["ONE WORD ONLY", "NO MORE THAN TWO WORDS"], "sentence")]),
+    ))
+    assert result.paper["groups"][0]["instruction"] == (
+        "Complete the sentences below. Write NO MORE THAN TWO WORDS "
+        "for each answer."
+    )
+
+    result = run(generate_paper(
+        tmp_db, material, [{"type": "completion", "count": 1}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response(["ONE WORD ONLY"], "flowchart")]),
+    ))
+    assert result.paper["groups"][0]["instruction"] == (
+        "Complete the flow-chart below. Write ONE WORD ONLY for each answer."
+    )
+
+
+def test_short_answer_keeps_fixed_three_word_limit(tmp_db):
+    """short_answer stays a separate span type with the fixed 3-word limit
+    and its official instruction (design §4.2)."""
+    words, ranges = make_material(LONG)
+    two_hundred = find_span(words, "two hundred")
+    bank = find_span(words, "bank statement")
+    response = {"groups": [{"items": [
+        {"stem": "The deposit is ______ in total.",
+         "i0": two_hundred[0], "i1": two_hundred[1], "answer": "two hundred"},
+        {"stem": "You will need to provide a passport and a ______.",
+         "i0": bank[0], "i1": bank[1], "answer": "bank statement"},
+    ]}]}
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "short_answer", "count": 2}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response]),
+    ))
+    group = result.paper["groups"][0]
+    assert group["type"] == "short_answer"
+    assert group["instruction"] == (
+        "Answer the questions below. Write NO MORE THAN THREE WORDS "
+        "for each answer."
+    )
+    assert all(i["word_limit"] == "NO MORE THAN THREE WORDS"
+               for i in group["items"])
+    assert all(i["layout"] is None for i in group["items"])
+
+
+def test_regenerate_variation_marker_lands_in_task_frame(tmp_db):
+    """regenerate=True appends ``variation: <papers+1>`` to the task frame
+    (the last message), busting the local llm_cache key; the stable prefix
+    stays untouched. The paper itself may succeed or fail (the deterministic
+    top-up can fill an empty LLM response) -- only the marker matters."""
+    words, ranges = make_material(LONG)
+    material = as_material(words, ranges)
+
+    captured = []
+    try:
+        run(generate_paper(
+            tmp_db, material, [{"type": "completion", "count": 1}],
+            {"api_key": "test"}, lang="zh", regenerate=True,
+            chat_fn=fake_cached_chat([], capture=captured),
+        ))
+    except exam_gen.ExamGenError:
+        pass
+    assert captured
+    first = captured[0]["messages"]
+    assert [m["role"] for m in first] == ["system", "user", "user"]
+    assert "variation: 1" in first[-1]["content"]
+    # The marker rides only the task frame, never the cached prefix.
+    assert "variation:" not in first[0]["content"]
+    assert "variation:" not in first[1]["content"]
+
+    captured.clear()
+    try:
+        run(generate_paper(
+            tmp_db, material, [{"type": "completion", "count": 1}],
+            {"api_key": "test"}, lang="zh", regenerate=False,
+            chat_fn=fake_cached_chat([], capture=captured),
+        ))
+    except exam_gen.ExamGenError:
+        pass
+    assert captured
+    assert all("variation:" not in m["content"]
+               for c in captured for m in c["messages"])
+
+
+def test_generate_result_usage_populated_from_calls(tmp_db):
+    """GenerateResult.usage records every block-level cached_chat_json
+    return, with the task label and the cache-hit flag."""
+    words, ranges = make_material(LONG)
+    september = find_span(words, "September")
+    response = {"groups": [{"items": [
+        {"stem": "The flat is available from the first of ______.",
+         "i0": september[0], "i1": september[1], "answer": "September",
+         "word_limit": "ONE WORD ONLY", "layout": "notes"},
+    ]}]}
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 1}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([(
+            response,
+            ChatUsage(prompt_tokens=100, completion_tokens=20, cached_tokens=50),
+            True,
+        )]),
+    ))
+    assert result.usage == [{
+        "task": "exam:completion",
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "cached_tokens": 50,
+        "cached_hit": True,
+    }]
+
+
+# ------------------------------------- restored validator defenses (pre-T9)
+
+
+def test_completion_validation_blocks_edges_rubrics_and_paraphrases(tmp_db):
+    words, ranges = make_material(LONG)
+    dep = find_span(words, "deposit")
+    two = find_span(words, "two hundred")
+    passport = find_span(words, "passport")
+    september = find_span(words, "September")
+    ten = find_span(words, "ten")
+
+    def item(i0, i1, stem, answer, limit="NO MORE THAN TWO WORDS"):
+        return {"stem": stem, "i0": i0, "i1": i1, "answer": answer,
+                "word_limit": limit}
+
+    response = {
+        "groups": [
+            {
+                "title": "Housing",
+                "items": [
+                    item(two[0], two[1], "The deposit is ______ in total.",
+                         "two hundred"),
+                    # second word of the first content sentence: edge guard
+                    item(dep[0], dep[1],
+                         "Good morning I would like to ask about the ______ "
+                         "for the flat.", "deposit"),
+                    # answer inside a spoken rubric
+                    item(ten[0], ten[1],
+                         "You now have ______ minutes to check your answers.",
+                         "ten", limit="ONE WORD ONLY"),
+                    item(passport[0], passport[1],
+                         "You will need to provide a ______ and a bank "
+                         "statement.", "passport"),
+                    # a longer verbatim span snapped from the same quote
+                    # exceeds its declared limit
+                    item(two[0], two[1], "The deposit is ______ in total.",
+                         "two hundred and fifty pounds"),
+                    item(september[0], september[1],
+                         "The flat is available from the first of ______.",
+                         "September", limit="NO MORE THAN THREE WORDS"),
+                ],
+            }
+        ]
+    }
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 3}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response]),
+    ))
+    answers = [i["answer"] for g in result.paper["groups"] for i in g["items"]]
+    assert answers == ["two hundred", "passport", "September"]
+    assert [i["number"] for g in result.paper["groups"] for i in g["items"]] == [1, 2, 3]
+    assert all(
+        i["evidence"][0]["t_end"] > i["evidence"][0]["t_start"]
+        for g in result.paper["groups"] for i in g["items"]
+    )
+    assert any(
+        "保护" in w or "指令" in w or "句首" in w
+        for w in result.paper["warnings"]
+    )
+
+
+def test_completion_enforces_min_gap_between_answers(tmp_db):
+    """No-adjacent-blanks (legacy micro-guardrail re-encoded on the blocks
+    API): two completion answers closer than MIN_GAP_WORDS words cannot
+    both stand -- the later one is dropped with a warning."""
+    words, ranges = make_material(LONG)
+    passport = find_span(words, "passport")
+    bank = find_span(words, "bank statement")
+    september = find_span(words, "September")
+
+    response = {"groups": [{"items": [
+        # "passport" and "bank statement" sit 2 words apart in one sentence.
+        {"stem": "You will need to provide a passport and a ______.",
+         "i0": bank[0], "i1": bank[1], "answer": "bank statement",
+         "word_limit": "NO MORE THAN TWO WORDS"},
+        {"stem": "You will need to provide a ______ and a bank statement.",
+         "i0": passport[0], "i1": passport[1], "answer": "passport",
+         "word_limit": "ONE WORD ONLY"},
+        {"stem": "The flat is available from the first of ______.",
+         "i0": september[0], "i1": september[1], "answer": "September",
+         "word_limit": "NO MORE THAN THREE WORDS"},
+    ]}]}
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 2}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response, {"groups": []}]),
+    ))
+    answers = [i["answer"] for g in result.paper["groups"] for i in g["items"]]
+    # The earlier "passport" stands, the adjacent "bank statement" is
+    # dropped, and the distant "September" survives.
+    assert answers == ["passport", "September"]
+    assert any("过近" in w for w in result.paper["warnings"])
+
+
+def test_completion_rejects_missing_blank_and_leaked_answer(tmp_db):
+    words, ranges = make_material(LONG)
+    two = find_span(words, "two hundred")
+    response = {
+        "groups": [
+            {
+                "items": [
+                    {"stem": "The deposit is two hundred in total.",
+                     "i0": two[0], "i1": two[1], "answer": "two hundred",
+                     "word_limit": "NO MORE THAN TWO WORDS"},
+                    {"stem": "The deposit is ______ in total.",
+                     "i0": two[0], "i1": two[1], "answer": "two hundred",
+                     "word_limit": "NO MORE THAN TWO WORDS"},
+                ]
+            }
+        ]
+    }
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 1}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response]),
+    ))
+    items = [i for g in result.paper["groups"] for i in g["items"]]
+    assert len(items) == 1
+    assert items[0]["stem"].count("______") == 1
+    assert items[0]["answer"] == "two hundred"
+
+
+def test_mcq_answer_is_normalized_to_letter_and_bad_options_rejected(tmp_db):
+    words, ranges = make_material(LONG)
+    two_hundred = find_span(words, "two hundred")
+    good = {
+        "stem": "How much is the deposit?",
+        "options": ["One hundred pounds", "Two hundred pounds",
+                    "Three hundred pounds"],
+        "answer": "Two hundred pounds",
+        "evidence": [{"i0": two_hundred[0], "i1": two_hundred[1]}],
+    }
+    bad = {
+        "stem": "What is needed?",
+        "options": ["Passport", "Bank statement"],
+        "answer": "A",
+        "evidence": [{"i0": two_hundred[0], "i1": two_hundred[1]}],
+    }
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "mcq_single", "count": 2}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([{"groups": [{"items": [good, bad]}]},
+                                  {"groups": []}]),
+    ))
+    items = [i for g in result.paper["groups"] for i in g["items"]]
+    assert len(items) == 1
+    assert items[0]["answer"] == "B"
+    assert items[0]["options"][1] == "Two hundred pounds"
+
+
+def test_matching_requires_unique_options_and_evidence(tmp_db):
+    words, ranges = make_material(LONG)
+    two_hundred = find_span(words, "two hundred")
+    quote = " ".join(w["w"] for w in words[two_hundred[0]: two_hundred[1] + 1])
+    response = {
+        "groups": [
+            {
+                "title": "Facilities",
+                "options": ["Deposit", "Passport", "September", "Bus stop"],
+                "items": [
+                    {"stem": "Which amount is refundable?", "answer": "A",
+                     "evidence": [{"i0": two_hundred[0], "i1": two_hundred[1],
+                                   "quote": quote}]},
+                    {"stem": "When is it available?", "answer": "Deposit",
+                     "evidence": [{"i0": two_hundred[0], "i1": two_hundred[1]}]},
+                    {"stem": "What is outside?", "answer": "D",
+                     "evidence": [{"i0": two_hundred[0], "i1": two_hundred[1]}]},
+                ],
+            }
+        ]
+    }
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "matching", "count": 3}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([response, {"groups": []}]),
+    ))
+    items = [i for g in result.paper["groups"] for i in g["items"]]
+    assert [i["answer"] for i in items] == ["A", "D"]
+    assert result.paper["groups"][0]["options"] == [
+        "A. Deposit", "B. Passport", "C. September", "D. Bus stop",
+    ]
+
+
+def test_matching_two_blocks_share_one_pool(tmp_db):
+    """matching never splits its option pool: a second matching block
+    reuses the first block's pool (letters keep one meaning)."""
+    words, ranges = make_material(LONG)
+    two_hundred = find_span(words, "two hundred")
+    september_2 = find_span(words, "September", 2)
+    pool = ["Deposit", "Passport", "September", "Bus stop"]
+    first = {"groups": [{"title": "One", "options": pool, "items": [
+        {"stem": "Which amount is due?", "answer": "A",
+         "evidence": [{"i0": two_hundred[0], "i1": two_hundred[1]}]},
+    ]}]}
+    # Second block invents its own pool; the shared pool must win.
+    second = {"groups": [{"title": "Two",
+                          "options": ["Alpha", "Beta", "Gamma", "Delta"],
+                          "items": [
+        {"stem": "Which month?", "answer": "C",
+         "evidence": [{"i0": september_2[0], "i1": september_2[1]}]},
+    ]}]}
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "matching", "count": 1}, {"type": "matching", "count": 1}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([first, second]),
+    ))
+    groups = result.paper["groups"]
+    assert len(groups) == 2
+    for group in groups:
+        assert group["options"] == [
+            "A. Deposit", "B. Passport", "C. September", "D. Bus stop",
+        ]
+    assert groups[1]["items"][0]["answer"] == "C"
+    assert groups[1]["items"][0]["answer_text"] == "September"
+
+
+def test_visual_block_is_skipped_with_a_warning(tmp_db):
+    """map_labelling needs the scene path (design §4.3, later task): the
+    block is skipped with a warning, no LLM call is spent, and the
+    skipped list stays empty in Task 10."""
+    words, ranges = make_material(LONG)
+    two_hundred = find_span(words, "two hundred")
+    mcq = {
+        "stem": "How much is the deposit?",
+        "options": ["One hundred pounds", "Two hundred pounds",
+                    "Three hundred pounds"],
+        "answer": "B",
+        "evidence": [{"i0": two_hundred[0], "i1": two_hundred[1]}],
+    }
+    captured = []
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "mcq_single", "count": 1}, {"type": "map_labelling", "count": 5}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([{"groups": [{"items": [mcq]}]}],
+                                 capture=captured),
+    ))
+    assert any("地图" in w or "场景" in w for w in result.paper["warnings"])
+    assert result.paper["total_items"] == 1
+    assert result.paper["groups"][0]["type"] == "mcq_single"
+    assert result.skipped == []
+    # No LLM call was spent on the visual block.
+    assert [c["task"] for c in captured] == ["exam:mcq_single"]
+
+
+def test_word_floor_skips_blocks_below_minimum(tmp_db):
+    """The deterministic min_words precheck (design §4.5) skips types the
+    transcript cannot feed; when every block is floored the paper fails."""
+    # 85 words: completion (80) fits, mcq_single (120) does not.
     words, ranges = make_material(SENTENCES)
+    september = find_span(words, "September")
+    completion = {"groups": [{"items": [
+        {"stem": "The flat is available from the first of ______.",
+         "i0": september[0], "i1": september[1], "answer": "September",
+         "word_limit": "ONE WORD ONLY", "layout": "notes"},
+    ]}]}
+    captured = []
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 1}, {"type": "mcq_single", "count": 2}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([completion], capture=captured),
+    ))
+    assert [g["type"] for g in result.paper["groups"]] == ["completion"]
+    assert any("单选题" in w and "词" in w for w in result.paper["warnings"])
+    assert [c["task"] for c in captured] == ["exam:completion"]
+
+    # A tiny transcript floors every requested type -> hard failure.
+    tiny_words, tiny_ranges = make_material(["Hello there my friend."])
+    with pytest.raises(exam_gen.ExamGenError, match="词"):
+        run(generate_paper(
+            tmp_db, as_material(tiny_words, tiny_ranges),
+            [{"type": "completion", "count": 3}],
+            {"api_key": "test"}, lang="zh",
+        ))
+
+
+def test_generate_paper_rejects_bad_blocks(tmp_db):
+    words, ranges = make_material(SENTENCES)
+    material = as_material(words, ranges)
     with pytest.raises(exam_gen.ExamGenError):
-        run(
-            generate_paper(
-                tmp_db, words, ranges, part=1,
-                llm_cfg={"api_key": "test"},
-            )
-        )
+        run(generate_paper(tmp_db, material, [], {"api_key": "test"}))
+    with pytest.raises(exam_gen.ExamGenError):
+        run(generate_paper(
+            tmp_db, material, [{"type": "no_such_type", "count": 2}],
+            {"api_key": "test"},
+        ))
+    with pytest.raises(exam_gen.ExamGenError):
+        run(generate_paper(
+            tmp_db, material, [{"type": "completion", "count": 0}],
+            {"api_key": "test"},
+        ))
+    with pytest.raises(exam_gen.ExamGenError):
+        run(generate_paper(
+            tmp_db, material, [{"type": "completion", "count": 11}],
+            {"api_key": "test"},
+        ))
+    with pytest.raises(exam_gen.ExamGenError):
+        run(generate_paper(
+            tmp_db, material, [{"type": "completion", "count": 1}],
+            {"api_key": "test"}, layout_hint="mind-map",
+        ))
 
 
-# ----------------------------------------------- T10: restored on blocks API
-# The preset/part-based generator tests were temporarily removed with the
-# six-key registry swap (Task 9 deletes PRESETS / PaperPreset / GroupSpec /
-# parts and stubs generate_paper). Task 10 rebuilds generation on the
-# blocks API ({blocks: [{type, count}]}) and restores / rewrites:
-#   - completion validation (edge/rubric/paraphrase/blank/leak guards)
-#   - MCQ letter normalization + bad option counts
-#   - matching option-pool uniqueness + evidence requirements
-#   - visual block skip (map scene path per design §4.3)
-#   - request validation (unknown type, count caps, word floors, refusal)
-#   - three-part message shape through the generation entry point
+def test_generate_paper_sends_three_part_messages(tmp_db):
+    """§8.1 pinned at the generator: every call is exactly
+    [system, stable frame (transcript + candidates), task frame]."""
+    words, ranges = make_material(LONG)
+    captured = []
+    try:
+        run(generate_paper(
+            tmp_db, as_material(words, ranges),
+            [{"type": "completion", "count": 1}],
+            {"api_key": "test"}, lang="zh",
+            chat_fn=fake_cached_chat([], capture=captured),
+        ))
+    except exam_gen.ExamGenError:
+        pass  # empty LLM responses may leave the paper empty
+
+    assert captured
+    for call in captured:
+        messages = call["messages"]
+        assert [m["role"] for m in messages] == ["system", "user", "user"]
+        assert messages[0]["content"].startswith("你是剑桥雅思听力命题人")
+        # stable frame: transcript + candidates; task frame: rules + JSON
+        assert "可用于命题的转写内容" in messages[1]["content"]
+        assert "候选答案" in messages[1]["content"]
+        assert "题型要求" in messages[2]["content"]
+        assert "返回 JSON：" in messages[2]["content"]
+        assert "填空题" in messages[2]["content"]
+
+
+def test_completion_word_limit_rides_schema_hint():
+    """The completion schema hint tells the LLM about word_limit/layout."""
+    hint = exam_gen._schema_hint(QUESTION_TYPES["completion"])
+    assert "word_limit" in hint
+    assert "layout" in hint
+    short = exam_gen._schema_hint(QUESTION_TYPES["short_answer"])
+    assert "word_limit" not in short

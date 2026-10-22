@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class LlmSettingsIn(BaseModel):
@@ -51,9 +51,51 @@ class SetCreateIn(BaseModel):
     transcript_override: Optional[str] = None
 
 
-# T10: the paper-generation request schema (blocks: [{type, count}], design
-# §5.2) arrives with the blocks API; the old part/preset body went away
-# with the preset registry in Task 9.
+# T10: the paper-generation request body (design §5.2): free blocks in user
+# order, an optional forced completion layout, and the regenerate marker.
+class ExamBlockIn(BaseModel):
+    """One ``{type, count}`` block; count is capped by the type registry."""
+
+    type: str
+    count: int = Field(ge=1, le=10)
+
+    @model_validator(mode="after")
+    def _check_registry(self) -> "ExamBlockIn":
+        from app.services.exam_presets import QUESTION_TYPES
+
+        qtype = QUESTION_TYPES.get(self.type)
+        if qtype is None:
+            raise ValueError(
+                f"unknown question type: {self.type!r}; "
+                f"available: {', '.join(sorted(QUESTION_TYPES))}"
+            )
+        if self.count > qtype.max_count:
+            raise ValueError(
+                f"count for {self.type} must be 1-{qtype.max_count}"
+            )
+        return self
+
+
+class ExamGenerateIn(BaseModel):
+    """POST /api/materials/{id}/exam body (design §5.2)."""
+
+    blocks: list[ExamBlockIn] = Field(min_length=1)
+    layout_hint: Optional[str] = None
+    regenerate: bool = False
+
+    @field_validator("layout_hint")
+    @classmethod
+    def _check_layout_hint(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        from app.services.exam_presets import QUESTION_TYPES
+
+        allowed = QUESTION_TYPES["completion"].layouts
+        if value not in allowed:
+            raise ValueError(
+                f"layout_hint must be one of {list(allowed)}, got {value!r}"
+            )
+        return value
 
 
 class AnswerIn(BaseModel):
