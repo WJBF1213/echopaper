@@ -87,7 +87,9 @@ describe('LibraryView', () => {
     // the score-era chip is gone for good
     expect(cards[0].text()).not.toContain('最好')
     expect(cards[1].text()).toContain('0 份试卷')
-    expect(cards[1].text()).toContain('语音朗读')
+    // has_audio=0: no audio chip at all (the TTS chip died with PracticeView)
+    expect(cards[1].text()).not.toContain('语音朗读')
+    expect(cards[1].text()).not.toContain('含音频')
     wrapper.unmount()
   })
 

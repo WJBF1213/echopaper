@@ -24,7 +24,7 @@ Edit the new file and translate **values only**:
 ```ts
 // frontend/src/i18n/locales/fr.ts
 const fr: Record<string, string> = {
-  'app.brand': 'IELTS Listening Cloze',
+  'app.brand': 'EchoPaper',
   'common.cancel': 'Annuler',
   'common.words': '{n} mots',
   // ...every other key
@@ -167,7 +167,7 @@ MESSAGES: dict[str, dict[str, str]] = {
     "zh": { ... },
     "en": { ... },
     "fr": {                                      # new block
-        "app.title": "IELTS Listening Cloze",
+        "app.title": "EchoPaper",
         "common.material_not_found": "Matériel introuvable",
         "job.transcribing": "Transcription locale en cours",
         "engine.unknown": "Moteur inconnu : {name}",
@@ -192,23 +192,27 @@ These entries are not UI strings; they are the actual prompts sent to the LLM:
 
 | Key | Purpose |
 |---|---|
-| `question_gen.system` | Item-writer rules for selecting blanks |
-| `question_gen.user` | Per-chunk request with transcript indices and candidates |
-| `question_gen.retry` | Retry request listing rejected candidates |
-| `translate.system` | Translation system prompt |
-| `translate.user` | Translation user prompt |
+| `translate.system` | Translation system prompt (fallback channel) |
+| `translate.user` | Translation user prompt (fallback channel) |
 
 Translating them makes the model receive instructions in the new language, while
 the transcript itself stays English. If you prefer to keep prompts in English,
 simply copy the English values for these keys (they still must exist).
 
-Be careful with `question_gen.user`: it contains placeholders (`{a}`, `{b}`,
-`{lines}`, `{candidates}`, `{quota}`) and doubled braces for the JSON example.
-Changing either breaks prompt formatting or the expected output shape.
+Be careful with `translate.user`: it contains the `{text}` placeholder and must
+keep it. Python `.format()` is used, so literal braces are doubled (`{{` / `}}`)
+— preserve that escaping exactly.
+
+> The exam-generation prompts (system / stable frame / task frames / per-type
+> rules / map-scene reconstruction / batch translation) are **not** in this
+> catalog. They live in the prompt registry
+> (`backend/app/services/prompts.py`) and carry their own zh/en text; users
+> override them per key in Settings, so a new UI language does not need to
+> touch them.
 
 ### 2.4 Error and job messages
 
-Entries such as `job.*`, `engine.*`, `llm.*`, `audio.*`, `manual.*`,
+Entries such as `job.*`, `engine.*`, `llm.*`, `audio.*`,
 `translate.gtx_empty`, `translate.mymemory_empty`, and `common.*` surface
 directly in the UI/API responses. Translate them normally.
 

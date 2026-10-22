@@ -4,7 +4,7 @@
  */
 const en: Record<string, string> = {
   // --- shell -----------------------------------------------------------
-  'app.brand': 'IELTS Listening Cloze',
+  'app.brand': 'EchoPaper',
   'app.nav.label': 'Main navigation',
   'app.nav.library': 'Library',
   'app.nav.review': 'Review',
@@ -47,7 +47,7 @@ const en: Record<string, string> = {
   'source.manual': 'Plain text',
 
   // --- library ---------------------------------------------------------
-  'library.title': 'Listening cloze practice',
+  'library.title': 'Listening papers',
   'library.subtitle.before':
     'Upload audio or paste a transcript to store it in the library; open the material page to pick question types and generate a full paper.',
   'library.batches.title': 'Import history',
@@ -59,7 +59,8 @@ const en: Record<string, string> = {
   'library.materials.title': 'Materials',
   'library.search.placeholder': 'Search by name',
   'library.search.aria': 'Search materials',
-  'library.empty': 'No materials yet. Upload audio or paste a transcript to create your first set.',
+  'library.empty':
+    'No materials yet. Upload audio or paste a transcript to create your first paper.',
   'library.emptyFiltered': 'No materials match “{query}”',
   'library.asr.title': 'Local speech recognition',
   'library.delete.confirm':
@@ -71,7 +72,6 @@ const en: Record<string, string> = {
 
   // --- material card ---------------------------------------------------
   'materialCard.hasAudio': 'Audio',
-  'materialCard.ttsOnly': 'Text-to-speech',
   'materialCard.delete': 'Delete material',
 
   // --- new material form ------------------------------------------------
@@ -287,6 +287,7 @@ const en: Record<string, string> = {
   'settings.prompts.category.rules': 'Question-type rules',
   'settings.save': 'Save settings',
   'settings.saving': 'Saving…',
+  'settings.version': 'EchoPaper v{version}',
   'settings.engine.parakeet': 'parakeet-mlx (Apple Silicon)',
   'settings.engine.whisper': 'mlx-whisper (Apple Silicon)',
   'settings.engine.fasterWhisper': 'faster-whisper (CUDA / CPU, cross-platform)',

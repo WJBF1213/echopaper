@@ -3,7 +3,7 @@
  */
 const zh: Record<string, string> = {
   // --- shell -----------------------------------------------------------
-  'app.brand': '雅思听力挖空',
+  'app.brand': 'EchoPaper',
   'app.nav.label': '主导航',
   'app.nav.library': '材料库',
   'app.nav.review': '回顾',
@@ -46,7 +46,7 @@ const zh: Record<string, string> = {
   'source.manual': '纯文本',
 
   // --- library ---------------------------------------------------------
-  'library.title': '听力填空练习',
+  'library.title': '听力整卷练习',
   'library.subtitle.before':
     '上传音频或粘贴原文，自动转写入库；进入材料页勾选题型，一键生成整卷练习。',
   'library.batches.title': '批量导入记录',
@@ -58,7 +58,7 @@ const zh: Record<string, string> = {
   'library.materials.title': '材料',
   'library.search.placeholder': '按名称搜索',
   'library.search.aria': '搜索材料',
-  'library.empty': '还没有材料。上传音频或粘贴原文即可创建第一份练习。',
+  'library.empty': '还没有材料。上传音频或粘贴原文即可创建第一份试卷。',
   'library.emptyFiltered': '没有匹配「{query}」的材料',
   'library.asr.title': '本地识别',
   'library.delete.confirm': '删除材料「{name}」？试卷、作答记录与错词本将一并删除。',
@@ -69,7 +69,6 @@ const zh: Record<string, string> = {
 
   // --- material card ---------------------------------------------------
   'materialCard.hasAudio': '含音频',
-  'materialCard.ttsOnly': '语音朗读',
   'materialCard.delete': '删除材料',
 
   // --- new material form ------------------------------------------------
@@ -272,6 +271,7 @@ const zh: Record<string, string> = {
   'settings.prompts.category.rules': '题型规则',
   'settings.save': '保存设置',
   'settings.saving': '保存中…',
+  'settings.version': 'EchoPaper v{version}',
   'settings.engine.parakeet': 'parakeet-mlx（Apple Silicon）',
   'settings.engine.whisper': 'mlx-whisper（Apple Silicon）',
   'settings.engine.fasterWhisper': 'faster-whisper（CUDA / CPU，跨平台）',

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve IELTS Listening Cloze. This guide covers local setup,
+Thanks for helping improve EchoPaper. This guide covers local setup,
 tests, conventions, and adding a UI language. For a step-by-step language guide
 with full snippets, see [`docs/ADDING_A_LANGUAGE.md`](docs/ADDING_A_LANGUAGE.md).
 
@@ -40,8 +40,8 @@ npm install
 npm run dev                 # http://127.0.0.1:5173
 ```
 
-The committed `frontend/dist/` is served by the backend. After changing frontend
-code, rebuild it so the bundled app stays in sync:
+`frontend/dist/` is not tracked by Git. The backend serves it when it exists;
+after changing frontend code, build it locally so the bundled app appears:
 
 ```bash
 cd frontend
@@ -83,25 +83,31 @@ Please run both suites (and `npm run build`) before opening a pull request.
 
 ### LLM calls
 
-- Every LLM call is a **stateless single-shot request**: exactly `[system, user]`
-  messages. Never accumulate cross-call or cross-material history.
+- Every LLM call is a **stateless single request** with a stable message
+  prefix (exam generation sends `system -> stable frame -> task frame`).
+  Never accumulate cross-call or cross-material history.
+- Message order is deliberate: the stable parts come first so provider
+  prefix caching works, and responses are additionally served from the
+  local `llm_cache` table (stable prefix + temperature 0 makes hits
+  likely). Editing a prompt in Settings invalidates related cache entries.
 - The 256k-token (262144) context cap is a hard limit; configuration may lower
-  it but never raise it. Over-budget material is split at sentence boundaries
-  into independent calls.
-- A retry embeds the previous failure reason in the user turn; it is still a
-  single `[system, user]` request.
-- Missing/invalid LLM configuration must degrade gracefully to the local
-  `nouns` mode rather than break ingestion.
+  it but never raise it.
+- A retry embeds the previous failure reason in the **last** message, keeping
+  the prefix (and therefore the cache key) stable.
+- LLM output is JSON-schema validated; a response that fails validation is
+  retried once with the reason appended, then rejected.
 
 ### Question correctness
 
-- **Answers must be verbatim, contiguous spans of the transcript.** Code, not
-  the model, is the authority: validate word indices, answer text, order,
-  1–3-word span length, and the minimum 5-word gap between blanks.
-- Never "fix up" an answer by rewriting, translating, abbreviating, or completing
-  it. Reject it instead.
-- Manual mode uses `[bracketed]` answers and anchors them to the transcript the
-  same way; keep that behavior verbatim.
+- **Answers and evidence must be verbatim spans of the transcript.** Code,
+  not the model, is the authority: item evidence word indices, answers,
+  order, and option/blank consistency are all validated; invalid output is
+  rejected (or the block refused), never "fixed up".
+- When the transcript cannot support a question type, the generator returns
+  a refusal with a one-line reason instead of forcing items (shown in the
+  UI as a skipped block).
+- Map scenes are hard-validated too (canvas bounds, unique node ids,
+  continuous blank-slot numbering, node spacing) before rendering.
 
 ### Frontend / i18n
 
@@ -136,8 +142,11 @@ Short version:
 3. **Backend catalog** — in `backend/app/i18n.py`, copy the `"en"` block in
    `MESSAGES` to `"<code>"`, translate the values, and add the code to
    `SUPPORTED`. Keys must match exactly.
-4. **LLM prompts (optional)** — `question_gen.*` and `translate.*` entries are
-   the prompts themselves; translating them localizes LLM output too.
+4. **LLM prompts (optional)** — the `translate.*` entries in the backend
+   catalog are prompts themselves; translating them localizes the fallback
+   translation requests. The exam-generation prompts live in the prompt
+   registry (`backend/app/services/prompts.py`) and are edited per key in
+   Settings, not via the catalogs.
 5. **Test**:
    ```bash
    cd frontend && npm test
@@ -152,10 +161,11 @@ Full snippets and manual verification steps: [`docs/ADDING_A_LANGUAGE.md`](docs/
 
 - [ ] Backend tests pass: `python -m pytest backend/tests -q`
 - [ ] Frontend tests pass: `cd frontend && npm test`
-- [ ] Frontend builds: `cd frontend && npm run build` (and `frontend/dist/` is updated if UI code changed)
+- [ ] Frontend builds: `cd frontend && npm run build` (dist is not
+      committed; build locally to see the bundled UI)
 - [ ] New user-visible strings added to all locale catalogs, keys/placeholders identical
 - [ ] Backend services layer still has no FastAPI imports
-- [ ] Answers are still verbatim transcript spans; validation and gap rules intact
+- [ ] Answers/evidence are still verbatim transcript spans; validation intact
 - [ ] No secrets, `.env`, `data/`, model caches, or `test_sound/` audio committed
 - [ ] Docs updated when behavior, configuration, or setup changes
 - [ ] Launchers still work on their platform (or the change is documented)

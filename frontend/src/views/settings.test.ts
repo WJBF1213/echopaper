@@ -18,6 +18,7 @@ vi.mock('../api', async () => {
       listPrompts: vi.fn(),
       putPrompt: vi.fn(),
       clearLlmCache: vi.fn(),
+      health: vi.fn(),
     },
   }
 })
@@ -113,6 +114,14 @@ describe('SettingsView', () => {
       customized: Boolean(text),
     }))
     mocked.clearLlmCache.mockResolvedValue({ deleted: 3 })
+    mocked.health.mockResolvedValue({ ok: true, version: '0.1.0' })
+  })
+
+  it('shows the app version from /api/health in the footer', async () => {
+    const wrapper = await mountView()
+    expect(mocked.health).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.version-footer').text()).toContain('EchoPaper v0.1.0')
+    wrapper.unmount()
   })
 
   it('loads settings and masks the stored key', async () => {

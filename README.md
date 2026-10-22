@@ -2,22 +2,25 @@
 
 English | [中文](README.zh-CN.md)
 
-A local-first IELTS-style listening practice app: upload listening audio,
-transcribe it locally with word-level timestamps, generate cloze
-(fill-in-the-blank) questions, and practise in the browser with synchronized
-playback.
+EchoPaper is a local-first IELTS-style listening practice app for Windows and
+macOS: import listening audio, transcribe it locally with word-level
+timestamps, optionally translate it with an LLM, generate a full exam paper
+from the transcript (six question types, including LLM-reconstructed map
+scenes rendered as SVG), grade it on the server, review per-item accuracy and
+a wrong-word book, and drill sentences in a bilingual intensive-listening
+view. Everything runs on your machine; an LLM API key is only needed for
+paper generation and LLM translation.
 
 ```
-audio upload ──► local ASR (word timestamps) ──► hybrid question generation ──► browser practice
-                                                  ├─ spaCy candidate pool
-                                                  ├─ LLM picks word spans (optional)
-                                                  └─ code validates verbatim anchors
+audio upload ──► local ASR (word timestamps) ──► optional LLM translation
+                                                        │
+              intensive listening ◄── review ◄── grading ◄── full-paper generation (six types)
 ```
 
-The backend is FastAPI; the frontend is a Vue 3 SPA served by the backend
-from `frontend/dist/`. That directory is not tracked by Git — prebuilt
-bundles ship via GitHub Releases, and running from source requires one
-`npm run build` (see [Manual setup](#manual-setup)).
+The backend is FastAPI; the frontend is a Vue 3 SPA that the backend serves
+from `frontend/dist/` when that directory exists. `dist` is not tracked by
+Git — running from source requires one `npm run build`
+(see [Manual setup](#manual-setup)).
 
 ## Features
 
@@ -29,19 +32,41 @@ bundles ship via GitHub Releases, and running from source requires one
   All engines produce word-level timestamps. The active model is loaded lazily on
   the first transcription and unloaded after an idle period (or manually), which
   frees roughly 1.2–2 GB of memory.
-- **Hybrid question generation.** A spaCy candidate pool proposes nouns, numbers,
-  names, etc.; the LLM selects word-index spans; code enforces the hard rules:
-  answers must be verbatim contiguous transcript spans, at most 3 words, in
-  transcript order, at least 5 words apart, not sentence-initial, and (when the
-  engine reports probabilities) not low-confidence. The code fills any shortfall.
-  Without an LLM key, the app falls back to the purely local `nouns` mode.
-- **LLM context discipline.** One stateless `[system, user]` call per request,
-  never any cross-material history. The total context is hard-capped at 256k
-  tokens (262144); over-budget material is split at sentence boundaries into
-  independent calls.
+- **Full-paper generation.** Pick question types and counts on the material
+  page — multiple choice (single / two answers), matching, completion (with
+  form/table/notes/sentence/summary/flow-chart layouts), short answer, and map
+  labelling — and the LLM writes a complete paper. Code, not the model, is the
+  authority: answers and evidence must be verbatim transcript spans, and
+  anything the transcript cannot support comes back as a refused block with a
+  one-line reason instead of a forced question.
+- **Map scenes.** For map labelling the LLM reconstructs the scene (nodes,
+  paths, numbered blanks) from the spatial language; the backend hard-validates
+  it (canvas bounds, unique ids, continuous blank numbering, node spacing) and
+  the paper renders it as an interactive SVG.
+- **Server-side grading.** Submitting a paper grades every item on the server,
+  accepting reasonable answer variants (case, spacing, number forms, curated
+  alternatives). Attempts and per-item results persist in SQLite — no score is
+  kept, only per-item correctness.
+- **Review.** Per-item accuracy grouped by paper, by-type accuracy across all
+  papers, and a wrong-word book aggregated by answer text with a jump back to
+  the paper containing the item.
+- **Bilingual intensive listening.** A dedicated view lists every sentence
+  with its Chinese translation (produced during import, with gtx → MyMemory
+  fallbacks when no LLM is configured): click a sentence to play it, loop it
+  with A/B (shortcut `L`), and scrub word by word.
+- **Editable prompts.** Every LLM prompt lives in a registry and can be edited
+  in Settings (设置 → 提示词) — global system prompt, task frames, per-type
+  rules, map-scene reconstruction, batch translation. Saving empty text
+  restores the built-in default. Editing a prompt invalidates related LLM
+  cache entries.
+- **LLM cache and prefix discipline.** Requests are assembled with a stable
+  message prefix and temperature 0, so provider-side prefix caching works and
+  responses are additionally served from the persistent local `llm_cache`
+  table. Settings has a "Clear LLM cache" button. The context is hard-capped
+  at 256k tokens (262144).
 - **Batch import.** Select up to 50 audio files at once with per-file progress;
-  failures do not affect the rest. Optionally generate question sets during
-  import, or transcribe now and generate later.
+  failures do not affect the rest. Papers are generated later from the
+  material page.
 - **Materials, timestamps, replay.** Materials store audio, transcript, and
   word-level timing. The transcript displays a timestamp at each sentence start
   (hideable); click a timestamp to play from that sentence (with A/B looping), or
@@ -49,12 +74,7 @@ bundles ship via GitHub Releases, and running from source requires one
 - **Transcript alignment.** Paste the official transcript together with audio and
   the app maps timestamps onto the official words (difflib word alignment,
   interpolating inserted words). Editing the transcript later re-anchors it and
-  marks old question sets stale instead of deleting history.
-- **Practice and review.** Question sets, per-attempt scoring, full-dictation
-  attempts, a cross-material wrong-word book with timestamps, and overall stats
-  are persisted in SQLite.
-- **Sentence translation.** `POST /api/translate` provides cached English →
-  Chinese sentence translation with gtx → MyMemory → LLM fallbacks.
+  marks old papers stale instead of deleting history.
 - **Bilingual UI.** Chinese and English are built in, with a header language
   selector, browser-language detection, and per-request `Accept-Language` for
   backend messages. See [Adding a language](#adding-a-language).
@@ -62,10 +82,15 @@ bundles ship via GitHub Releases, and running from source requires one
   never returned by the API (only a masked hint). They can optionally be seeded
   from `.env`.
 
+Without an LLM key the app still imports, transcribes, aligns, and replays
+material; paper generation needs a key (the exam endpoint answers `400` with a
+hint).
+
 ## Platform support
 
-Windows and macOS are both supported. Intel Macs and Linux can run the app and
-use the `faster_whisper` CPU fallback for local recognition.
+Windows and macOS are the supported platforms. Intel Macs and Linux can run
+the app and use the `faster_whisper` CPU fallback for local recognition
+(a Linux launcher is on the [roadmap](#roadmap)).
 
 | Platform | Available ASR engines | Notes |
 |---|---|---|
@@ -79,32 +104,37 @@ Common requirements:
 - **Python 3.10+**
 - **ffmpeg** on `PATH` (audio decoding for all ASR engines)
 - **Node.js 20.19+ (or 22.12+)** when you build the frontend from source
-  (Vite 7 requirement); a prebuilt bundle from the Releases page runs the
-  app without Node.js.
+  (Vite 7 requirement)
 
 ## Quick start
+
+### Windows
+
+Double-click **`start-windows.bat`**. The first run creates the virtual
+environment, installs dependencies, sets up the spaCy model, writes a default
+`.env`, starts the server, and opens <http://127.0.0.1:8300>. Double-click
+**`stop-windows.bat`** to stop the server and release model memory.
 
 ### macOS
 
 Double-click **`start-macos.command`**. On the first run it creates `.venv`,
 installs dependencies (including `mlx-whisper` / `parakeet-mlx`), tries to
 install the spaCy English model, writes a default `.env`, starts the server, and
-opens <http://127.0.0.1:8300>. Double-click **`stop-macos.command`** to stop the
-server; all model memory is released immediately.
+opens <http://127.0.0.1:8300>. Double-click **`stop-macos.command`** to stop
+the server; all model memory is released immediately.
 
 If macOS blocks the script, right-click it and choose **Open**, or run
 `chmod +x start-macos.command stop-macos.command` once in Terminal.
 
-### Windows
+### First run notes
 
-Double-click **`start-windows.bat`**. The first run creates the virtual environment,
-installs dependencies, sets up the spaCy model, writes a default `.env`, starts the
-server, and opens <http://127.0.0.1:8300>. Double-click **`stop-windows.bat`** to
-stop the server and release model memory.
-
-Both launchers install from the Tsinghua PyPI mirror and use the
-`HF_ENDPOINT=https://hf-mirror.com` mirror for model downloads by default. The
-LLM is optional; the app is usable without any API key.
+- The **first transcription downloads the ASR model** (roughly 1.2–1.6 GB;
+  see [Models and downloads](#models-and-downloads)). Progress shows in the
+  task bar; keep the launcher window open.
+- Both launchers install from the Tsinghua PyPI mirror and use
+  `HF_ENDPOINT=https://hf-mirror.com` for model downloads by default.
+- The **LLM key is optional at start**: configure it later in Settings
+  (needed for paper generation and LLM translation; ASR works without).
 
 ## Manual setup
 
@@ -120,7 +150,7 @@ source .venv/bin/activate
 
 pip install -r backend/requirements.txt -r backend/requirements-dev.txt
 
-# Optional: better candidate selection; without it a heuristic word list is used
+# Optional: better lemma/POS support for grading; without it a heuristic is used
 python -m spacy download en_core_web_sm
 ```
 
@@ -159,7 +189,7 @@ Platform notes:
 
 Copy `.env.example` to `.env` (the launchers create one on first run). Process
 environment variables take precedence over `.env`. The Settings page persists
-LLM/ASR/generation values in `data/app.db`, and those stored values override the
+LLM/ASR values in `data/app.db`, and those stored values override the
 file defaults for those sections.
 
 | Variable | Default | Purpose |
@@ -179,13 +209,12 @@ file defaults for those sections.
 | `LLM_MODEL` | provider preset | Model name |
 | `LLM_API_KEY` | empty | Optional key seed; the Settings page is the normal path |
 | `LLM_MAX_CONTEXT_TOKENS` | `262144` | May be lowered, never raised above 256k |
-| `GEN_BLANK_COUNT` | `10` | Blank-count setting exposed in the Settings page (requests carry an explicit count) |
 
 A `.env` naming an MLX engine on a non-Apple-Silicon machine is detected at
 runtime and automatically falls back to `faster_whisper` instead of failing every
 job.
 
-### LLM providers
+### LLM providers and caching
 
 The Settings page offers presets for OpenAI-compatible providers:
 
@@ -204,12 +233,27 @@ found, etc.).
 
 Common causes of a failed test: a nonexistent model name (for DeepSeek use
 `deepseek-chat` or `deepseek-reasoner`), a base URL with a missing or extra
-`/v1`, insufficient balance, or a proxy/network problem. A key typed but not
-saved is not visible to the backend, so the panel tests the form's current values
-instead of only the stored ones.
+`/v1`, insufficient balance, or a proxy/network problem.
 
-Without a key the app still works: question generation uses the local `nouns`
-mode. With a key it uses `llm` mode, which is the higher-quality hybrid pipeline.
+**Cache behavior.** LLM requests are assembled with a stable message prefix
+(system → stable frame → task frame) and temperature 0, so providers can reuse
+prefix caches, and every JSON response is additionally cached in the local
+`llm_cache` table — regenerating the same paper, or reopening it on another
+day, costs nothing. Editing a prompt in Settings invalidates the related
+entries, and **Clear LLM cache** wipes the table on demand.
+
+### Editing prompts
+
+Settings → **Prompts** lists every LLM prompt (global system, task frames,
+per-type rules, map-scene reconstruction, batch translation) with its
+variables. Edit the text and save, or press **Reset to default** (which sends
+empty text). Keep every listed `{{variable}}` — the backend rejects a prompt
+that drops a required one.
+
+> Upgrading from a pre-0.1.0 experiment build where you had customized the
+> **map labelling rules** prompt? Reset that override once in Settings →
+> Prompts — v0.1.0 added a required blank-slot numbering rule that old
+> overrides do not contain.
 
 ## Models and downloads
 
@@ -244,36 +288,49 @@ from the request's `Accept-Language` (the frontend sends the selected UI locale)
 - Detailed step-by-step with code snippets:
   [`docs/ADDING_A_LANGUAGE.md`](docs/ADDING_A_LANGUAGE.md)
 
-Both test suites assert catalog key parity and non-empty values. LLM prompt
-entries (`question_gen.*`, `translate.*`) are localizable in the backend catalog
-as well.
+Both test suites assert catalog key parity and non-empty values. The
+`translate.*` fallback prompts are localizable in the backend catalog; the
+exam-generation prompts live in the prompt registry
+(`backend/app/services/prompts.py`) and are edited in Settings, not via the
+catalogs.
 
 ## API overview
 
-The complete contract lives in the design document (§8) and the interactive docs
-at `/docs`.
+The interactive docs at `/docs` are authoritative. The v0.1.0 surface:
 
 ```
-GET  /api/health                      Health check
+GET  /api/health                      Health check + app version
 GET  /api/asr/status | POST /api/asr/load | POST /api/asr/unload
-GET|PUT /api/settings                 LLM/ASR/generation settings (key write-only)
-POST /api/settings/test-llm           Probe the LLM with the form's current values
+GET|PUT /api/settings                 LLM/ASR settings (key write-only)
+POST /api/settings/test-llm           Probe the LLM with the form's values
+GET|PUT /api/prompts                  List prompt registry / save or reset one
+DELETE /api/llm-cache                 Clear the local LLM cache
+
 POST /api/materials                   Create a material (multipart) -> {job_id}
-POST /api/materials/batch             Batch import audio files -> {batch_id, jobs[]}
-GET  /api/batches[/{id}]              Batch history / per-file progress
-GET  /api/jobs/{id}                   Job progress (queued -> transcribing -> generating -> done|error)
-GET  /api/materials[/{id}]            List / detail
+POST /api/materials/batch             Batch import audio -> {batch_id, jobs[]}
+GET  /api/batches | /api/batches/{id} Batch history / per-file progress
+GET  /api/jobs/{id}                   Job progress (queued -> downloading ->
+                                      transcribing -> translating -> done|error)
+GET  /api/materials[/{id}]            List / detail (words + sentence spans)
 DELETE /api/materials/{id}
 GET  /api/materials/{id}/audio        Audio stream (HTTP Range supported)
-PUT  /api/materials/{id}/transcript   Edit transcript and re-anchor timestamps
-POST /api/materials/{id}/sets         Generate a set (llm | nouns | manual)
-GET|DELETE /api/sets/{id}             Set detail (t_start/t_end/word_limit per blank)
-POST /api/sets/{id}/attempts          Submit and score an attempt
-POST /api/materials/{id}/attempts     Full-dictation attempt
-GET  /api/materials/{id}/attempts     Attempt history for a material
-GET  /api/review/wrong-words          Cross-material wrong-word book
-GET  /api/stats                       Overview statistics
-POST /api/translate                   Sentence EN -> ZH with cache and fallbacks
+PUT  /api/materials/{id}/transcript   Edit transcript and re-align timestamps
+GET  /api/materials/{id}/translations Sentence translation snapshot (listen view)
+
+GET  /api/exam/types                  The six registered question types
+POST /api/materials/{id}/exam         Generate + persist a full paper
+                                      -> {paper_id, skipped[]}
+GET  /api/materials/{id}/papers       The material's papers
+GET|DELETE /api/papers/{id}           Paper detail (spec + paper JSON) / delete
+POST /api/papers/{id}/attempts        Submit answers -> server-side per-item
+                                      grading -> {attempt_id, items[]}
+GET  /api/papers/{id}/attempts        Attempt history (newest first)
+GET  /api/attempts/{id}               One attempt's per-item detail
+GET  /api/papers/{id}/stats           Per-item accuracy for one paper
+GET  /api/stats                       By-type accuracy across all papers
+
+GET  /api/review/wrong-words          Wrong-word book (aggregated by answer)
+POST /api/translate                   Sentence EN -> ZH (cache + fallbacks)
 ```
 
 ## Smoke test checklist
@@ -281,23 +338,24 @@ POST /api/translate                   Sentence EN -> ZH with cache and fallbacks
 After installation, confirm:
 
 1. The launcher starts the server and opens <http://127.0.0.1:8300>;
-   `GET /api/health` returns `{"ok": true, ...}`.
+   `GET /api/health` returns `{"ok": true, "version": "0.1.0"}`.
 2. `GET /api/asr/status` reports `unloaded`; idle memory stays low.
-3. Import an audio file: the job moves through `transcribing` → `generating` →
-   `done` (the first run downloads the model), and the material's `words` carry
-   `s`/`e` timestamps.
+3. Import an audio file: the job moves through `transcribing` →
+   (`translating`) → `done` (the first run downloads the model), and the
+   material's `words` carry `s`/`e` timestamps.
 4. Open the material: sentence-start timestamps are shown; clicking a word plays
    from that word and highlights it.
 5. Batch-import 2–3 files: progress updates per file and one failure does not
    stop the others.
-6. Save an LLM key and generate an `llm` set: every answer can be found verbatim
-   in the transcript. Without a key, `nouns` mode still works.
-7. Wait for the idle timeout (or use `POST /api/asr/unload`): status returns to
+6. Save an LLM key, pick question types, and generate a paper: every answer can
+   be found verbatim in the transcript; a map block renders as an SVG scene or
+   is skipped with a reason.
+7. Submit answers: grading is immediate and per-item; the review page shows
+   per-item accuracy and the wrong-word book.
+8. Wait for the idle timeout (or use `POST /api/asr/unload`): status returns to
    `unloaded` and memory drops.
-8. Switch engines in Settings: the current model unloads and the next job uses
-   the new engine.
-9. Restart the app: materials, sets, attempts, and wrong-word records persist in
-   `data/`. Stop the app: the port-8300 process exits and memory is released.
+9. Restart the app: materials, papers, attempts, and wrong-word records persist
+   in `data/`. Stop the app: the port-8300 process exits and memory is released.
 
 ## Testing
 
@@ -321,26 +379,56 @@ npm run build
 backend/app/            FastAPI app
   routers/              HTTP endpoints
   services/             Domain layer (no FastAPI imports; portable)
-  i18n.py               Backend message + LLM prompt catalogs
+    exam_gen.py         Full-paper generation (six types, refusal handling)
+    exam_scene.py       LLM map-scene reconstruction + hard validation
+    exam_grade.py       Server-side grading with answer equivalence
+    prompts.py          Prompt registry + per-key overrides (Settings)
+    llm.py              OpenAI-compatible client + persistent llm_cache
+    translate_svc.py    LLM-first batch translation with gtx/MyMemory fallback
+  i18n.py               Backend message catalogs (zh/en)
   config.py             .env / environment settings
 backend/tests/          pytest suite (engines/LLM/network mocked)
 frontend/src/           Vue 3 SPA
   i18n/                 Dependency-free i18n layer and zh/en catalogs
-  views/ components/    UI
+  views/                Library, Material, Paper, Review, Listen, Settings
+  components/           MapScene (SVG), TranscriptView, PlayerBar, ...
   composables/ lib/     player, polling, helpers
-frontend/dist/          Build output served by the backend (not tracked;
-                        build with npm run build or unpack a Release bundle)
-data/                   Runtime: app.db, audio/, incoming/ (ignored by Git)
+frontend/dist/          Build output served by the backend when present
+                        (not tracked; build with npm run build)
+data/                   Runtime: app.db (schema v3), audio/ (ignored by Git)
 .models/                Hugging Face model cache (ignored by Git)
-docs/                   Design and implementation docs (mostly Chinese)
-docs/ADDING_A_LANGUAGE.md  Step-by-step localization guide
-start-macos.command / stop-macos.command         macOS launchers
+docs/                   Design and reference docs (mostly Chinese)
 start-windows.bat / stop-windows.bat             Windows launchers
+start-macos.command / stop-macos.command         macOS launchers
 LICENSE                 MIT
-SECURITY.md             Vulnerability reporting and key handling
-CONTRIBUTING.md         Setup, conventions, language guide
-README.zh-CN.md         Chinese translation of this README
 ```
+
+## Documentation
+
+- [`README.zh-CN.md`](README.zh-CN.md) — Chinese version of this README
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, conventions, PR checklist
+- [`SECURITY.md`](SECURITY.md) — vulnerability reporting and key handling
+- [`docs/ADDING_A_LANGUAGE.md`](docs/ADDING_A_LANGUAGE.md) — step-by-step
+  localization guide
+- [`docs/reference/ielts-listening-rules.md`](docs/reference/ielts-listening-rules.md) —
+  official IELTS part/type reference (backup reference; not yet wired into the
+  LLM prompts)
+- [`docs/EXPERIMENT_FULL_EXAM.md`](docs/EXPERIMENT_FULL_EXAM.md) — the design
+  experiment that led to the v0.1.0 paper-only redesign (historical record)
+- `docs/superpowers/` — design specs, implementation plans, and experiment logs
+  from the development process (historical records)
+
+## Roadmap
+
+- **Linux deployment** — a first-class launcher and packaged build for Linux.
+- **Multi-user server edition** — deployment mode with authentication and
+  per-user data instead of the single-user local app.
+- **Batch API pre-generation** — offline paper generation via batch (async)
+  LLM endpoints for lower cost.
+- **Anthropic explicit cache params** — pass explicit prompt-caching parameters
+  on top of the current stable-prefix strategy.
+- **Official Part combination quick-picks** — one-click paper presets matching
+  real IELTS part shapes (e.g. Part 1 form + Part 2 map + Part 3 matching).
 
 ## License
 

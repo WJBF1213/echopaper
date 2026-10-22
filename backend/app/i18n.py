@@ -70,7 +70,7 @@ def t(key: str, **params: Any) -> str:
 MESSAGES: dict[str, dict[str, str]] = {
     "zh": {
         # --- generic -------------------------------------------------------
-        "app.title": "雅思听力挖空练习",
+        "app.title": "EchoPaper",
         "common.untitled_material": "未命名材料",
         "common.material_not_found": "材料不存在",
         "common.paper_not_found": "试卷不存在",
@@ -133,7 +133,7 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "en": {
         # --- generic -------------------------------------------------------
-        "app.title": "IELTS Listening Cloze",
+        "app.title": "EchoPaper",
         "common.untitled_material": "Untitled material",
         "common.material_not_found": "Material not found",
         "common.paper_not_found": "Paper not found",

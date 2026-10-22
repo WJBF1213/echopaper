@@ -2,21 +2,21 @@
 
 [English](README.md) | 中文
 
-> 本文是英文 [README.md](README.md) 的中文翻译；若两者内容不一致，以英文版为准。
+> 本文与英文 [README.md](README.md) 结构保持同步；若内容不一致，以英文版为准。
 
-本地优先的 IELTS 风格听力练习应用：上传听力音频 → 本地语音识别（词级时间戳）→
-混合出题（挖空题）→ 在浏览器中配合音频练习。
+EchoPaper 是一款本地优先的雅思风格听力练习应用（Windows / macOS）：导入听力音频 →
+本地语音识别（词级时间戳）→ 可选的 LLM 翻译 → 从转写生成整卷试卷（六种题型，
+含 LLM 重建并以 SVG 渲染的地图场景）→ 服务端判分 → 逐题正确率与错词本回顾 →
+中英双语精听。全部在本地运行；只有出卷与 LLM 翻译需要 API key。
 
 ```
-上传音频 ──► 本地 ASR（词级时间戳）──► 混合出题 ──► 浏览器练习
-                                       ├─ spaCy 候选词池
-                                       ├─ LLM 选择词跨度（可选）
-                                       └─ 代码硬校验逐字锚定
+上传音频 ──► 本地 ASR（词级时间戳）──► 可选 LLM 翻译
+                                            │
+        精听 ◄── 回顾 ◄── 服务端判分 ◄── 整卷生成（六种题型）
 ```
 
-后端为 FastAPI；前端为 Vue 3 SPA，由后端静态托管其构建产物 `frontend/dist/`。
-该目录不入库——预构建包随 GitHub Release 附带；从源码运行需先执行一次
-`npm run build`（见[手动安装](#手动安装)）。
+后端为 FastAPI；前端为 Vue 3 SPA，后端检测到构建产物 `frontend/dist/` 时自动托管。
+该目录不入库——从源码运行需先执行一次 `npm run build`（见[手动安装](#手动安装)）。
 
 ## 功能
 
@@ -27,34 +27,47 @@
     Apple Silicon 之外的平台默认使用
   三种引擎都输出词级时间戳。模型在首次转写时按需加载，空闲后自动卸载（也可手动
   卸载），约释放 1.2–2 GB 内存。
-- **混合出题**：spaCy 候选池（名词、数字、专有名词等）→ LLM 按词索引选空 →
-  代码硬校验：答案必须是转写原文中逐字连续的一段、最多 3 个词、按原文顺序、相邻空
-  至少间隔 5 个词、不能位于句首；引擎给出置信度时还会拒绝低置信度词。数量不足时
-  由代码补齐。没有 LLM key 时回退到纯本地的 `nouns` 模式。
-- **LLM 上下文纪律**：每次调用都是无状态的 `[system, user]` 单次请求，绝不携带
-  跨材料历史。总上下文硬上限 256k tokens（262144）；超预算材料按句边界切分为
-  相互独立的调用。
+- **整卷生成**：在材料页勾选题型与数量——单选、多选（选两项）、匹配、填空
+  （表单/表格/笔记/句子/摘要/流程图版式）、简答、地图标注——由 LLM 一次性写出一
+  份完整试卷。代码是最终裁判：答案与证据必须是转写原文的逐字段跨度；原文撑不起的
+  题型以「跳过 + 一行原因」返回，绝不硬凑题目。
+- **地图场景**：地图标注题由 LLM 从空间描述中重建场景（节点、路径、编号空位），
+  后端硬校验（画布边界、id 唯一、空位连续编号、节点间距），试卷中以可交互 SVG
+  渲染。
+- **服务端判分**：提交试卷后逐题在服务端判分，接受合理的答案变体（大小写、空格、
+  数字形式、人工同义答案）。作答与逐题结果持久化在 SQLite——不存分数，只存逐题
+  对错。
+- **回顾**：按试卷分组的逐题正确率、跨试卷的按题型统计、按答案文本聚合的错词本，
+  可一键跳回错题所在的试卷。
+- **中英双语精听**：专门的精听页逐句列出原文与中文翻译（导入时由 LLM 生成；无
+  LLM 时回退 gtx → MyMemory 渠道）：点击句子即播放，AB 循环单句（快捷键 `L`），
+  可逐词定位。
+- **提示词可编辑**：所有 LLM 提示词收入注册表，可在设置页（设置 → 提示词）编辑
+  ——全局系统提示、任务框架、各题型规则、地图场景重建、批量翻译。保存空文本即
+  恢复内置默认。编辑提示词会使相关 LLM 缓存条目失效。
+- **LLM 缓存与前缀纪律**：请求按稳定消息前缀（system → 稳定框架 → 任务框架）
+  组装、temperature 0，既吃得到服务商前缀缓存，也命中本地持久化的 `llm_cache`
+  表。设置页提供「清空 LLM 缓存」按钮。总上下文硬上限 256k tokens（262144）。
 - **批量导入**：一次最多选择 50 个音频，逐文件显示进度，单项失败不影响其他文件。
-  可选择导入时顺便出题，或先转写入库、之后再生成题集。
+  试卷之后在材料页生成。
 - **材料、时间戳与回放**：材料保存音频、原文和词级时间戳。原文每句开头显示时间戳
   （可隐藏）；点击时间戳从该句播放（支持 AB 循环），点击任意单词从该词播放并实时
   高亮。
 - **转写对齐**：上传音频时同时粘贴官方原文，应用会把时间戳映射到官方文本
-  （difflib 词级对齐，插入词插值）。事后编辑转写会重新锚定，并把旧题集标记为
+  （difflib 词级对齐，插入词插值）。事后编辑转写会重新锚定，并把旧试卷标记为
   stale 保留历史，而不是删除。
-- **练习与回顾**：题集、每次作答判分、全篇听写、跨材料错词本（带时间戳）以及
-  总览统计全部持久化在 SQLite。
-- **逐句翻译**：`POST /api/translate` 提供带缓存的英译中，按 gtx → MyMemory →
-  LLM 顺序兜底。
 - **中英双语界面**：内置中文和英文，顶栏可切换语言，支持浏览器语言检测；后端消息
   按请求的 `Accept-Language` 本地化。参见[添加语言](#添加语言)。
 - **密钥只写不读**：LLM 密钥保存在本地 SQLite，API 只返回是否已配置和掩码提示，
   也可通过 `.env` 预置。
 
+没有 LLM key 时应用仍可导入、识别、对齐、回放材料；生成试卷需要 key（exam 接口
+会返回 `400` 并附提示）。
+
 ## 平台支持
 
-Windows 与 macOS 均受支持。Intel Mac 和 Linux 可运行应用，并使用
-`faster_whisper` 的 CPU 回退进行本地识别。
+Windows 与 macOS 为受支持平台。Intel Mac 和 Linux 可运行应用，并使用
+`faster_whisper` 的 CPU 回退进行本地识别（Linux 启动器在[路线图](#路线图)中）。
 
 | 平台 | 可用 ASR 引擎 | 说明 |
 |---|---|---|
@@ -67,10 +80,15 @@ Windows 与 macOS 均受支持。Intel Mac 和 Linux 可运行应用，并使用
 
 - **Python 3.10+**
 - **ffmpeg** 在 `PATH` 中（所有 ASR 引擎解码音频都需要）
-- **Node.js 20.19+（或 22.12+）**：从源码构建前端时需要（Vite 7 要求）；
-  Release 附带的预构建包无需 Node.js 即可运行。
+- **Node.js 20.19+（或 22.12+）**：从源码构建前端时需要（Vite 7 要求）
 
 ## 快速开始
+
+### Windows
+
+双击 **`start-windows.bat`**。首次运行会创建虚拟环境、安装依赖、配置 spaCy 模型、
+写入默认 `.env`、启动服务并打开 <http://127.0.0.1:8300>。双击
+**`stop-windows.bat`** 停止服务并释放模型内存。
 
 ### macOS
 
@@ -82,15 +100,13 @@ Windows 与 macOS 均受支持。Intel Mac 和 Linux 可运行应用，并使用
 若 macOS 拦截脚本，右键选择 **打开**，或在终端执行一次
 `chmod +x start-macos.command stop-macos.command`。
 
-### Windows
+### 首次运行说明
 
-双击 **`start-windows.bat`**。首次运行会创建虚拟环境、安装依赖、配置 spaCy 模型、
-写入默认 `.env`、启动服务并打开 <http://127.0.0.1:8300>。双击
-**`stop-windows.bat`** 停止服务并释放模型内存。
-
-两个平台的启动脚本默认使用清华 PyPI 镜像安装依赖，并使用
-`HF_ENDPOINT=https://hf-mirror.com` 下载模型。LLM 为可选项，没有 API key 也能
-正常使用。
+- **首次转写会下载 ASR 模型**（约 1.2–1.6 GB，见[模型与下载](#模型与下载)）。
+  进度显示在任务栏；请保持启动窗口开启。
+- 两个平台的启动脚本默认使用清华 PyPI 镜像安装依赖，并使用
+  `HF_ENDPOINT=https://hf-mirror.com` 下载模型。
+- **LLM key 可稍后配置**：出卷与 LLM 翻译需要；本地识别无需 key。
 
 ## 手动安装
 
@@ -106,7 +122,7 @@ source .venv/bin/activate
 
 pip install -r backend/requirements.txt -r backend/requirements-dev.txt
 
-# 可选：提升候选词质量；未安装时使用启发式词表
+# 可选：提升判分所需的词形/词性支持；未安装时使用启发式
 python -m spacy download en_core_web_sm
 ```
 
@@ -142,7 +158,7 @@ npm run build      # vue-tsc --noEmit && vite build -> frontend/dist
 ## 配置
 
 复制 `.env.example` 为 `.env`（启动脚本首次运行会自动创建）。进程环境变量优先于
-`.env`。设置页会把 LLM/ASR/出题配置持久化到 `data/app.db`，这些已保存的值会覆盖
+`.env`。设置页会把 LLM/ASR 配置持久化到 `data/app.db`，这些已保存的值会覆盖
 对应配置段的文件默认值。
 
 | 变量 | 默认值 | 作用 |
@@ -162,12 +178,11 @@ npm run build      # vue-tsc --noEmit && vite build -> frontend/dist
 | `LLM_MODEL` | 服务商预设 | 模型名 |
 | `LLM_API_KEY` | 空 | 可选的密钥预置；通常直接在设置页填写 |
 | `LLM_MAX_CONTEXT_TOKENS` | `262144` | 可调低，但绝不允许超过 256k |
-| `GEN_BLANK_COUNT` | `10` | 设置页展示的挖空数配置（每次请求会显式携带数量） |
 
 若在非 Apple Silicon 机器上的 `.env` 指定了 MLX 引擎，运行时会自动回退到
 `faster_whisper`，而不是让每个任务失败。
 
-### LLM 服务商
+### LLM 服务商与缓存
 
 设置页内置以下 OpenAI 兼容服务商预设：
 
@@ -183,11 +198,22 @@ npm run build      # vue-tsc --noEmit && vite build -> frontend/dist
 会显示服务商返回的原始原因（HTTP 401、模型不存在等）。
 
 常见失败原因：模型名不存在（DeepSeek 使用 `deepseek-chat` 或
-`deepseek-reasoner`）、接口地址少了或多了 `/v1`、余额不足、代理/网络不通。只在
-输入框敲了 key 但没保存时，后端读不到它——测试使用的是表单当前值。
+`deepseek-reasoner`）、接口地址少了或多了 `/v1`、余额不足、代理/网络不通。
 
-没有密钥也能使用：出题自动使用本地 `nouns` 模式；有密钥时使用质量更高的 `llm`
-混合模式。
+**缓存行为**：LLM 请求按稳定消息前缀（system → 稳定框架 → 任务框架）组装、
+temperature 0，服务商可复用前缀缓存；同时每个 JSON 响应额外缓存在本地
+`llm_cache` 表——重新生成同一份试卷、或改天再打开，都不再花钱。编辑提示词会使
+相关条目失效；设置页的 **清空 LLM 缓存** 按钮可一键清空。
+
+### 编辑提示词
+
+设置 → **提示词** 列出全部 LLM 提示词（全局系统提示、任务框架、各题型规则、
+地图场景重建、批量翻译）及其变量。编辑后保存即可；按 **恢复默认**（即提交空文本）
+可还原内置默认。请保留列出的每个 `{{变量}}`——缺少必需变量的提示词会被后端
+拒绝。
+
+> 从 0.1.0 之前的实验版升级、且自定义过 **地图标注规则** 提示词？请在
+> 设置 → 提示词 中重置一次该覆盖——v0.1.0 新增了旧覆盖里没有的空位编号规则。
 
 ## 模型与下载
 
@@ -217,33 +243,46 @@ npm run build      # vue-tsc --noEmit && vite build -> frontend/dist
 - 带代码片段的详细步骤：
   [`docs/ADDING_A_LANGUAGE.md`](docs/ADDING_A_LANGUAGE.md)
 
-两套测试都会断言目录键集合一致且值非空。LLM 提示词条目（`question_gen.*`、
-`translate.*`）同样可以在后端目录中本地化。
+两套测试都会断言目录键集合一致且值非空。`translate.*` 兜底提示词可在后端目录中
+本地化；出卷提示词位于提示词注册表（`backend/app/services/prompts.py`），在设置页
+编辑，与目录无关。
 
 ## API 快览
 
-完整契约见设计文档 §8，以及 `/docs` 的交互式文档。
+交互式文档 `/docs` 为准。v0.1.0 接口面：
 
 ```
-GET  /api/health                      健康检查
+GET  /api/health                      健康检查 + 应用版本
 GET  /api/asr/status | POST /api/asr/load | POST /api/asr/unload
-GET|PUT /api/settings                 LLM/ASR/出题配置（密钥只写不读）
+GET|PUT /api/settings                 LLM/ASR 配置（密钥只写不读）
 POST /api/settings/test-llm           用表单当前值测试 LLM 连通性
+GET|PUT /api/prompts                  提示词注册表 / 保存或重置一条
+DELETE /api/llm-cache                 清空本地 LLM 缓存
+
 POST /api/materials                   新建材料（multipart）-> {job_id}
 POST /api/materials/batch             批量导入音频 -> {batch_id, jobs[]}
-GET  /api/batches[/{id}]              批次历史 / 逐文件进度
-GET  /api/jobs/{id}                   任务进度（queued -> transcribing -> generating -> done|error）
-GET  /api/materials[/{id}]            列表 / 详情
+GET  /api/batches | /api/batches/{id} 批次历史 / 逐文件进度
+GET  /api/jobs/{id}                   任务进度（queued -> downloading ->
+                                      transcribing -> translating -> done|error）
+GET  /api/materials[/{id}]            列表 / 详情（词与句子跨度）
 DELETE /api/materials/{id}
 GET  /api/materials/{id}/audio        音频流（支持 HTTP Range）
 PUT  /api/materials/{id}/transcript   编辑转写并重新锚定时间戳
-POST /api/materials/{id}/sets         生成题集（llm | nouns | manual）
-GET|DELETE /api/sets/{id}             题集详情（每空含 t_start/t_end/word_limit）
-POST /api/sets/{id}/attempts          提交并判分
-POST /api/materials/{id}/attempts     全篇听写
-GET  /api/materials/{id}/attempts     材料的作答历史
-GET  /api/review/wrong-words          跨材料错词本
-GET  /api/stats                       总览统计
+GET  /api/materials/{id}/translations 句子翻译快照（精听页）
+
+GET  /api/exam/types                  六种注册题型
+POST /api/materials/{id}/exam         生成并持久化整卷
+                                      -> {paper_id, skipped[]}
+GET  /api/materials/{id}/papers       材料的试卷列表
+GET|DELETE /api/papers/{id}           试卷详情（spec + 试卷 JSON）/ 删除
+POST /api/papers/{id}/attempts        提交答案 -> 服务端逐题判分
+                                      -> {attempt_id, items[]}
+GET  /api/papers/{id}/attempts        作答历史（最新在前）
+GET  /api/attempts/{id}               单次作答的逐题明细
+GET  /api/papers/{id}/stats           单份试卷的逐题正确率
+GET  /api/stats                       跨试卷的按题型统计
+
+GET  /api/review/wrong-words          错词本（按答案聚合）
 POST /api/translate                   英译中（带缓存与多级兜底）
 ```
 
@@ -252,17 +291,17 @@ POST /api/translate                   英译中（带缓存与多级兜底）
 安装完成后确认：
 
 1. 启动脚本启动服务并打开 <http://127.0.0.1:8300>；`GET /api/health` 返回
-   `{"ok": true, ...}`。
+   `{"ok": true, "version": "0.1.0"}`。
 2. `GET /api/asr/status` 返回 `unloaded`，空闲时内存占用较低。
-3. 导入一个音频：任务依次进入 `transcribing` → `generating` → `done`（首次会
+3. 导入一个音频：任务依次进入 `transcribing` →（`translating`）→ `done`（首次会
    下载模型），材料的 `words` 带 `s`/`e` 时间戳。
 4. 打开材料：每句开头显示时间戳；点击单词从该词播放并高亮。
 5. 批量导入 2–3 个音频：逐文件更新进度，单个失败不影响其他文件。
-6. 保存 LLM key 并生成 `llm` 题集：每个答案都能在转写中逐字找到。没有 key 时
-   `nouns` 模式仍可用。
-7. 等待空闲超时（或调用 `POST /api/asr/unload`）：状态回到 `unloaded`，内存下降。
-8. 在设置页切换引擎：当前模型卸载，下一个任务使用新引擎。
-9. 重启应用：材料、题集、作答、错词本都保留在 `data/`。停止应用：8300 端口
+6. 保存 LLM key，勾选题型并生成试卷：每个答案都能在转写中逐字找到；地图块渲染为
+   SVG 场景，或带原因地跳过。
+7. 提交答案：即时逐题判分；回顾页显示逐题正确率与错词本。
+8. 等待空闲超时（或调用 `POST /api/asr/unload`）：状态回到 `unloaded`，内存下降。
+9. 重启应用：材料、试卷、作答、错词本都保留在 `data/`。停止应用：8300 端口
    进程退出，内存释放。
 
 ## 测试
@@ -287,26 +326,50 @@ npm run build
 backend/app/            FastAPI 应用
   routers/              HTTP 路由
   services/             领域层（不依赖 FastAPI，便于移植）
-  i18n.py               后端消息与 LLM 提示词目录
+    exam_gen.py         整卷生成（六种题型、拒绝处理）
+    exam_scene.py       LLM 地图场景重建 + 硬校验
+    exam_grade.py       服务端判分（答案等价类）
+    prompts.py          提示词注册表 + 按键覆盖（设置页）
+    llm.py              OpenAI 兼容客户端 + 持久化 llm_cache
+    translate_svc.py    LLM 优先批量翻译，gtx/MyMemory 兜底
+  i18n.py               后端消息目录（zh/en）
   config.py             .env / 环境变量配置
 backend/tests/          pytest 套件（引擎/LLM/网络全部 mock）
 frontend/src/           Vue 3 SPA
   i18n/                 无依赖 i18n 层与 zh/en 目录
-  views/ components/    界面
+  views/                材料库、材料、试卷、回顾、精听、设置
+  components/           MapScene（SVG）、TranscriptView、PlayerBar 等
   composables/ lib/     播放器、轮询、工具函数
-frontend/dist/          构建产物，由后端托管（不入库；npm run build
-                        或使用 Release 附带的预构建包）
-data/                   运行时：app.db、audio/、incoming/（Git 忽略）
+frontend/dist/          构建产物，后端检测到即托管（不入库；
+                        npm run build 生成）
+data/                   运行时：app.db（schema v3）、audio/（Git 忽略）
 .models/                Hugging Face 模型缓存（Git 忽略）
-docs/                   设计与实现文档（以中文为主）
-docs/ADDING_A_LANGUAGE.md  本地化分步指南
-start-macos.command / stop-macos.command         macOS 启动/停止
+docs/                   设计与参考文档（以中文为主）
 start-windows.bat / stop-windows.bat             Windows 启动/停止
+start-macos.command / stop-macos.command         macOS 启动/停止
 LICENSE                 MIT
-SECURITY.md             漏洞报告与密钥处理
-CONTRIBUTING.md         开发环境、约定与语言指南
-README.zh-CN.md         本中文 README
 ```
+
+## 文档索引
+
+- [`README.zh-CN.md`](README.zh-CN.md) —— 本中文 README
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) —— 开发环境、约定与 PR 清单
+- [`SECURITY.md`](SECURITY.md) —— 漏洞报告与密钥处理
+- [`docs/ADDING_A_LANGUAGE.md`](docs/ADDING_A_LANGUAGE.md) —— 本地化分步指南
+- [`docs/reference/ielts-listening-rules.md`](docs/reference/ielts-listening-rules.md) ——
+  官方雅思 Part/题型参考（备用参考，暂未接入 LLM）
+- [`docs/EXPERIMENT_FULL_EXAM.md`](docs/EXPERIMENT_FULL_EXAM.md) —— 引出 v0.1.0
+  纯整卷重构的设计实验（历史记录）
+- `docs/superpowers/` —— 开发过程中的设计规格、实施计划与实验日志（历史记录）
+
+## 路线图
+
+- **Linux 部署** —— 一等公民的 Linux 启动器与打包发行。
+- **多用户服务器版** —— 带认证与按用户隔离数据的部署模式，替代单用户本地应用。
+- **Batch API 预生成** —— 通过批量（异步）LLM 接口离线预生成试卷，进一步降低成本。
+- **Anthropic 显式缓存参数** —— 在现有稳定前缀策略之上传递显式 prompt 缓存参数。
+- **官方 Part 组合快捷预设** —— 一键生成贴合真实雅思 Part 结构的试卷预设
+  （如 Part 1 表单 + Part 2 地图 + Part 3 匹配）。
 
 ## 许可证
 

@@ -18,6 +18,8 @@ const saving = ref(false)
 const testing = ref(false)
 const apiKey = ref('')
 const testMessage = ref('')
+/** App version from GET /api/health; empty until it answers. */
+const appVersion = ref('')
 
 // --- prompts (Task 8) -----------------------------------------------------
 const promptEntries = ref<PromptEntry[]>([])
@@ -144,6 +146,13 @@ function onProviderChange() {
 
 async function load() {
   loading.value = true
+  // The footer version is decorative: never let a health hiccup break the page.
+  void api.health().then(
+    (h) => {
+      appVersion.value = h.version
+    },
+    () => {},
+  )
   try {
     const [s, status, prompts] = await Promise.all([
       api.getSettings(),
@@ -407,6 +416,10 @@ onMounted(load)
           {{ saving ? t('settings.saving') : t('settings.save') }}
         </button>
       </div>
+
+      <footer v-if="appVersion" class="version-footer">
+        {{ t('settings.version', { version: appVersion }) }}
+      </footer>
     </template>
   </div>
 </template>
@@ -468,5 +481,12 @@ onMounted(load)
 
 .prompt-entry .actions {
   margin-top: 8px;
+}
+
+.version-footer {
+  margin-top: 26px;
+  color: var(--ink-3);
+  font-size: 12px;
+  user-select: none;
 }
 </style>

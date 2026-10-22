@@ -16,8 +16,10 @@ const emit = defineEmits<{ open: []; remove: [] }>()
         <span>{{ tn('common.papers', material.papers_count, { n: material.papers_count }) }}</span>
         <span class="dot" aria-hidden="true">·</span>
         <span>{{ tn('common.attempts', material.attempts_count, { n: material.attempts_count }) }}</span>
-        <span class="dot" aria-hidden="true">·</span>
-        <span>{{ material.has_audio ? t('materialCard.hasAudio') : t('materialCard.ttsOnly') }}</span>
+        <template v-if="material.has_audio">
+          <span class="dot" aria-hidden="true">·</span>
+          <span>{{ t('materialCard.hasAudio') }}</span>
+        </template>
         <template v-if="material.duration_s">
           <span class="dot" aria-hidden="true">·</span>
           <span>{{ tn('common.minutes', Math.round(material.duration_s / 60), { n: Math.round(material.duration_s / 60) }) }}</span>
