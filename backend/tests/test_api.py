@@ -240,28 +240,57 @@ def test_batch_status_and_list(tmp_db, client):
     assert client.get("/api/batches/nope").status_code == 404
 
 
-def test_materials_list_with_stats(tmp_db, client):
+def test_materials_list_with_paper_counts(tmp_db, client):
+    """The redesign list columns (§六 LibraryView row): papers_count /
+    attempts_count / last_practice computed from the paper tables; the
+    sets-world columns (sets_count/best_score) are gone."""
     mid = _seed_material(tmp_db)
-    # one attempt 8/10 -> best score 0.8
     from app.services.jobs import _uid, _now
 
-    sid = _uid()
-    tmp_db.execute(
-        "INSERT INTO question_sets(id,material_id,mode,blank_count,params_json,"
-        "stale,created_at) VALUES(?,?, 'nouns',10,'{}',0,?)", (sid, mid, _now()))
-    aid = _uid()
-    tmp_db.execute(
-        "INSERT INTO attempts(id,set_id,material_id,mode,started_at,finished_at,"
-        "ok,total,duration_s) VALUES(?,?,?,?,?,?,?,?,?)",
-        (aid, sid, mid, "nouns", _now(), "2026-10-21T10:00:00", 8, 10, 60.0))
+    def _craft_paper():
+        paper = {
+            "material_id": mid,
+            "total_items": 1,
+            "warnings": [],
+            "groups": [{"type": "completion", "title": "T", "instruction": "",
+                        "options": [], "partial": False, "visual": None,
+                        "items": [{"number": 1, "type": "completion",
+                                   "answer": "castle", "alternatives": []}]}],
+        }
+        pid = _uid()
+        tmp_db.execute(
+            "INSERT INTO papers(id,material_id,spec_json,paper_json,created_at)"
+            " VALUES(?,?,?,?,?)",
+            (pid, mid, json.dumps({"blocks": []}), json.dumps(paper), _now()))
+        return pid
+
+    _craft_paper()
+    _craft_paper()
+    for created in ("2026-10-20T09:00:00+00:00", "2026-10-21T10:00:00+00:00"):
+        with tmp_db:
+            tmp_db.execute(
+                "INSERT INTO paper_attempts(id,paper_id,material_id,created_at)"
+                " VALUES(?,?,?,?)", (_uid(), _craft_paper(), mid, created))
+
     r = client.get("/api/materials")
     assert r.status_code == 200
     items = r.json()
     assert len(items) == 1
-    assert items[0]["id"] == mid
-    assert items[0]["sets_count"] == 1
-    assert abs(items[0]["best_score"] - 0.8) < 1e-9
-    assert items[0]["last_practice"] == "2026-10-21T10:00:00"
+    row = items[0]
+    assert row["id"] == mid
+    assert row["papers_count"] == 4
+    assert row["attempts_count"] == 2
+    assert row["last_practice"] == "2026-10-21T10:00:00+00:00"
+    # the score-era columns are gone for good
+    assert "sets_count" not in row
+    assert "best_score" not in row
+
+    # a material with no papers has zeros / null, never None counts
+    other = _seed_material(tmp_db, name="Empty")
+    empty = [m for m in client.get("/api/materials").json() if m["id"] == other][0]
+    assert empty["papers_count"] == 0
+    assert empty["attempts_count"] == 0
+    assert empty["last_practice"] is None
 
 
 def test_material_detail(tmp_db, client):
@@ -417,39 +446,71 @@ def test_dictation_attempt(tmp_db, client):
     assert body["results"][0]["correct"] is True
 
 
-def test_wrong_words_aggregation(tmp_db, client):
-    mid = _seed_material(tmp_db)
+def _craft_stored_paper(conn, mid, items):
+    """Insert a papers row whose items carry evidence timestamps; returns
+    its id (the wrong-words book reads t_start from paper_json, §5.2)."""
     from app.services.jobs import _uid, _now
 
-    sid = _uid()
-    tmp_db.execute(
-        "INSERT INTO question_sets(id,material_id,mode,blank_count,params_json,"
-        "stale,created_at) VALUES(?,?, 'nouns',2,'{}',0,?)", (sid, mid, _now()))
-    b1, b2 = _uid(), _uid()
-    tmp_db.executemany(
-        "INSERT INTO blanks(id,set_id,position,answer,alternatives_json,"
-        "word_start,word_end,t_start,t_end,type,word_limit)"
-        " VALUES(?,?,?,?,'[]',2,2,2.0,2.5,'noun','ONE WORD ONLY')",
-        [(b1, sid, 1, "castle"), (b2, sid, 2, "river")])
-    # two attempts, both miss 'castle' once, 'river' missed once
-    for _ in range(2):
-        r = client.post(f"/api/sets/{sid}/attempts", json={"answers": [
-            {"blank_id": b1, "text": "xxx"},
-            {"blank_id": b2, "text": "river"},
-        ]})
-        assert r.status_code == 200
-    client.post(f"/api/sets/{sid}/attempts", json={"answers": [
-        {"blank_id": b1, "text": "castle"},
-        {"blank_id": b2, "text": "yyy"},
-    ]})
+    paper = {
+        "material_id": mid,
+        "total_items": len(items),
+        "warnings": [],
+        "groups": [{
+            "type": "completion", "title": "Crafted", "instruction": "",
+            "options": [], "partial": False, "visual": None, "items": items,
+        }],
+    }
+    paper_id = _uid()
+    with conn:
+        conn.execute(
+            "INSERT INTO papers(id,material_id,spec_json,paper_json,created_at)"
+            " VALUES(?,?,?,?,?)",
+            (paper_id, mid, json.dumps({"blocks": []}),
+             json.dumps(paper), _now()))
+    return paper_id
+
+
+def test_wrong_words_aggregation(tmp_db, client):
+    """The redesigned wrong-words book (§5.2): paper_attempt_items JOIN
+    the stored paper JSON -- aggregated by answer text, and the replay
+    jump uses the evidence t_start of the most recent wrong attempt."""
+    mid = _seed_material(tmp_db)
+    paper_id = _craft_stored_paper(tmp_db, mid, [
+        {"number": 1, "type": "completion", "answer": "castle",
+         "alternatives": [],
+         "evidence": [{"i0": 2, "i1": 2, "quote": "castle",
+                       "t_start": 2.0, "t_end": 2.5}]},
+        {"number": 2, "type": "completion", "answer": "river",
+         "alternatives": [],
+         "evidence": [{"i0": 6, "i1": 6, "quote": "river",
+                       "t_start": 6.0, "t_end": 6.4}]},
+    ])
+
+    def _submit(answers):
+        res = client.post(f"/api/papers/{paper_id}/attempts",
+                          json={"answers": answers})
+        assert res.status_code == 200, res.text
+
+    _submit({"1": "xxx", "2": "river"})   # castle wrong
+    _submit({"1": "xxx", "2": "river"})   # castle wrong again
+    _submit({"1": "castle", "2": "yyy"})  # river wrong once, latest
+
     r = client.get("/api/review/wrong-words")
     assert r.status_code == 200
     items = r.json()
     by_word = {x["word"]: x for x in items}
     assert by_word["castle"]["times_wrong"] == 2
     assert by_word["river"]["times_wrong"] == 1
+    # every row carries the paper coordinates for the replay jump
+    assert by_word["castle"]["paper_id"] == paper_id
     assert by_word["castle"]["material_id"] == mid
+    assert by_word["castle"]["item_number"] == 1
     assert by_word["castle"]["t_start"] == 2.0
+    assert by_word["river"]["t_start"] == 6.0
+    # last_at tracks the most recent wrong attempt
+    assert by_word["castle"]["last_at"]
+    # ranked by frequency first
+    assert items[0]["word"] == "castle"
 
 
 def test_settings_key_write_only(tmp_db, client):

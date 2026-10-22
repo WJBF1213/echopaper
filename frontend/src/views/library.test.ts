@@ -32,8 +32,8 @@ const materials = [
     duration_s: 120,
     created_at: '2026-10-21T10:00:00Z',
     transcript_source: 'asr',
-    sets_count: 2,
-    best_score: 0.8,
+    papers_count: 2,
+    attempts_count: 5,
     last_practice: '2026-10-21T11:00:00Z',
     has_audio: 1,
   },
@@ -43,8 +43,8 @@ const materials = [
     duration_s: null,
     created_at: '2026-10-20T10:00:00Z',
     transcript_source: 'manual',
-    sets_count: 0,
-    best_score: null,
+    papers_count: 0,
+    attempts_count: 0,
     last_practice: null,
     has_audio: 0,
   },
@@ -77,13 +77,16 @@ describe('LibraryView', () => {
     })
   })
 
-  it('renders materials with set counts and best score chips', async () => {
+  it('renders materials with paper and attempt counts', async () => {
     const wrapper = await mountView()
     const cards = wrapper.findAll('.mat')
     expect(cards).toHaveLength(2)
     expect(cards[0].text()).toContain('剑桥 18 Test 1')
-    expect(cards[0].text()).toContain('2 套题')
-    expect(cards[0].text()).toContain('最好 80%')
+    expect(cards[0].text()).toContain('2 份试卷')
+    expect(cards[0].text()).toContain('5 次作答')
+    // the score-era chip is gone for good
+    expect(cards[0].text()).not.toContain('最好')
+    expect(cards[1].text()).toContain('0 份试卷')
     expect(cards[1].text()).toContain('语音朗读')
     wrapper.unmount()
   })

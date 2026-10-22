@@ -29,8 +29,10 @@ const en: Record<string, string> = {
   'common.seconds': '{n} s',
   'common.questions': '{n} questions',
   'common.questions.one': '{n} question',
-  'common.sets': '{n} sets',
-  'common.sets.one': '{n} set',
+  'common.papers': '{n} papers',
+  'common.papers.one': '{n} paper',
+  'common.attempts': '{n} attempts',
+  'common.attempts.one': '{n} attempt',
   'common.failed': 'Processing failed',
   'common.untitledMaterial': 'Untitled material',
   'common.unnamedFile': 'Unnamed file',
@@ -81,7 +83,6 @@ const en: Record<string, string> = {
   // --- material card ---------------------------------------------------
   'materialCard.hasAudio': 'Audio',
   'materialCard.ttsOnly': 'Text-to-speech',
-  'materialCard.best': 'Best {pct}%',
   'materialCard.delete': 'Delete material',
 
   // --- new material form ------------------------------------------------
@@ -178,22 +179,17 @@ const en: Record<string, string> = {
   'material.play': 'Play',
   'material.pause': 'Pause',
   'material.seek': 'Audio position',
-  'material.sets.title': 'Question sets',
-  'material.sets.empty': 'No question sets yet',
-  'material.sets.stale': 'Transcript updated',
-  'material.sets.start': 'Start practice',
-  'material.sets.delete': 'Delete set',
-  'material.sets.deleteConfirm': 'Delete this question set? Saved attempts are kept.',
-  'material.sets.deleted': 'Question set deleted',
-  'material.sets.created': 'Question set generated',
-  'material.sets.fewer':
-    'Only {n} questions were generated: the material has too few eligible positions ' +
-    '(gap, answer type, and spelling rules).',
-  'material.generate.mode': 'Mode',
-  'material.generate.count': 'Questions',
-  'material.generate.create': 'Generate new set',
-  'material.generate.creating': 'Generating…',
-  'material.manual.placeholder': 'Optional: paste a transcript with [bracketed] answers to override the ASR text.',
+  'material.papers.title': 'Papers',
+  'material.papers.empty':
+    'No papers yet — click “Generate full paper” to create the first one.',
+  'material.papers.open': 'Open',
+  'material.papers.delete': 'Delete paper',
+  'material.papers.deleteConfirm':
+    'Delete this paper? Its saved attempts are deleted too.',
+  'material.papers.deleted': 'Paper deleted',
+  'material.papers.attempts': 'Attempts',
+  'material.papers.attempts.empty': 'No attempts yet',
+  'material.papers.attempt.score': '{ok}/{total} correct',
   'material.transcript.title': 'Transcript',
   'material.transcript.hideStamps': 'Hide timestamps',
   'material.transcript.showStamps': 'Show timestamps',
@@ -201,7 +197,7 @@ const en: Record<string, string> = {
   'material.transcript.showStampsTitle': 'Show per-sentence timestamps',
   'material.transcript.edit': 'Edit',
   'material.transcript.saveAlign': 'Save & realign',
-  'material.transcript.saved': 'Transcript updated; older question sets are marked stale',
+  'material.transcript.saved': 'Transcript updated; older papers are marked stale',
   'material.transcript.hintTimed':
     'Click a timestamp to play from that sentence; click any word to play from it. ' +
     'The active word is highlighted.',
@@ -210,14 +206,7 @@ const en: Record<string, string> = {
   'material.transcript.hintAlign':
     'When audio and transcript are both supplied the transcript is authoritative; ' +
     'ASR only provides word-level timestamps. Editing the transcript realigns it and ' +
-    'marks older question sets stale.',
-  'material.attempts.title': 'Practice history',
-  'material.attempts.empty': 'No practice attempts yet',
-  'material.attempts.time': 'Time',
-  'material.attempts.mode': 'Mode',
-  'material.attempts.score': 'Score',
-  'material.attempts.duration': 'Duration',
-  'material.attempts.scoreValue': '{ok}/{total} ({pct}%)',
+    'marks older papers stale.',
 
   // --- practice --------------------------------------------------------
   'practice.back': 'Back',
@@ -305,11 +294,14 @@ const en: Record<string, string> = {
   // --- review ----------------------------------------------------------
   'review.title': 'Review',
   'review.subtitle':
-    'Overall accuracy and wrong words across materials. Click “Replay” to jump back to the word.',
-  'review.stat.materials': 'Materials',
-  'review.stat.attempts': 'Attempts',
-  'review.stat.average': 'Avg. accuracy',
-  'review.stat.wrong': 'Wrong words',
+    'Per-item accuracy grouped by paper, plus wrong answers across papers. ' +
+    'Click “Replay” to open the paper containing the item.',
+  'review.types.title': 'Accuracy by type',
+  'review.types.empty': 'No attempts yet',
+  'review.types.count': '{n} items',
+  'review.papers.title': 'Per-item accuracy',
+  'review.papers.empty': 'No attempted papers yet',
+  'review.item.value': '{pct}% ({correct}/{attempts})',
   'review.wrong.title': 'Wrong words',
   'review.wrong.empty': 'No wrong words yet',
   'review.wrong.word': 'Word',

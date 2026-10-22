@@ -13,16 +13,14 @@ const emit = defineEmits<{ open: []; remove: [] }>()
     <div class="mat-body">
       <div class="name">{{ material.name }}</div>
       <div class="meta">
-        <span>{{ tn('common.sets', material.sets_count, { n: material.sets_count }) }}</span>
+        <span>{{ tn('common.papers', material.papers_count, { n: material.papers_count }) }}</span>
+        <span class="dot" aria-hidden="true">·</span>
+        <span>{{ tn('common.attempts', material.attempts_count, { n: material.attempts_count }) }}</span>
         <span class="dot" aria-hidden="true">·</span>
         <span>{{ material.has_audio ? t('materialCard.hasAudio') : t('materialCard.ttsOnly') }}</span>
         <template v-if="material.duration_s">
           <span class="dot" aria-hidden="true">·</span>
           <span>{{ tn('common.minutes', Math.round(material.duration_s / 60), { n: Math.round(material.duration_s / 60) }) }}</span>
-        </template>
-        <template v-if="material.best_score != null">
-          <span class="dot" aria-hidden="true">·</span>
-          <span class="score">{{ t('materialCard.best', { pct: Math.round(material.best_score * 100) }) }}</span>
         </template>
         <template v-if="material.last_practice">
           <span class="dot" aria-hidden="true">·</span>
@@ -91,10 +89,6 @@ const emit = defineEmits<{ open: []; remove: [] }>()
   color: var(--ink-3);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-}
-
-.score {
-  color: var(--ok);
 }
 
 .dot {

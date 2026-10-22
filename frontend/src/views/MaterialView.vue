@@ -1,19 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, type AttemptHistoryItem, type MaterialDetail } from '../api'
+import {
+  api,
+  type ExamTypeInfo,
+  type MaterialDetail,
+  type PaperAttemptDetail,
+  type PaperAttemptSummary,
+  type PaperSummary,
+} from '../api'
 import { showToast } from '../router'
 import { usePlayer } from '../composables/usePlayer'
 import {
   fmtDateTime,
   fmtTime,
   hasWordTiming,
-  modeLabel,
-  pct,
   sentenceTimeRange,
   transcriptSourceLabel,
 } from '../lib/time'
-import { t, tn } from '../i18n'
+import { locale, t, tn } from '../i18n'
 import Icon from '../components/Icon.vue'
 import TranscriptView from '../components/TranscriptView.vue'
 
@@ -22,11 +27,17 @@ const router = useRouter()
 const materialId = computed(() => String(route.params.materialId || ''))
 
 const material = ref<MaterialDetail | null>(null)
-const attempts = ref<AttemptHistoryItem[]>([])
+const papers = ref<PaperSummary[]>([])
+const types = ref<ExamTypeInfo[]>([])
 const loading = ref(true)
-const generating = ref(false)
-const blankCount = ref(10)
-const manualText = ref('')
+
+/** Paper row whose attempt history is expanded (null = all collapsed). */
+const expandedPaperId = ref<string | null>(null)
+const attemptsByPaper = ref<Record<string, PaperAttemptSummary[]>>({})
+/** Attempt whose per-item detail is expanded, and its loaded detail. */
+const expandedAttemptId = ref<string | null>(null)
+const detailByAttempt = ref<Record<string, PaperAttemptDetail>>({})
+
 const editing = ref(false)
 const transcriptDraft = ref('')
 const savingTranscript = ref(false)
@@ -55,19 +66,29 @@ function seekToSentence(sentenceIndex: number) {
   if (times) seek(times.a, true)
 }
 
-const modes = computed(() => [
-  { value: 'llm', label: t('mode.llm') },
-  { value: 'nouns', label: t('mode.nouns') },
-  { value: 'manual', label: t('mode.manual') },
-])
-const newMode = ref('llm')
+/** Localized type name from the registry's two name fields (client locale);
+ * falls back to the raw key when the registry is unavailable offline. */
+function typeNameOf(key: string): string {
+  const info = types.value.find((x) => x.key === key)
+  if (!info) return key
+  return locale.value === 'zh' ? info.name_zh : info.name_en
+}
 
 async function load() {
   loading.value = true
   try {
     material.value = await api.getMaterial(materialId.value)
-    attempts.value = await api.getAttempts(materialId.value)
     transcriptDraft.value = material.value.transcript
+    // The registry is cosmetic here (composition chip labels); a failure
+    // must not take the page down -- typeNameOf falls back to raw keys.
+    const [paperRows, typeInfo] = await Promise.all([
+      api.listPapers(materialId.value),
+      api.examTypes().catch(() => ({ types: [] as ExamTypeInfo[] })),
+    ])
+    papers.value = paperRows
+    types.value = typeInfo.types
+    expandedPaperId.value = null
+    expandedAttemptId.value = null
     const t = Number(route.query.t)
     if (Number.isFinite(t) && t > 0) {
       setTimeout(() => seek(t, true), 300)
@@ -87,44 +108,56 @@ watch(
   },
 )
 
-async function createSet() {
-  if (!material.value) return
-  generating.value = true
+function openPaper(paper: PaperSummary) {
+  void router.push(`/paper/${materialId.value}/${paper.id}`)
+}
+
+function generatePaper() {
+  void router.push(`/paper/${materialId.value}`)
+}
+
+async function removePaper(paper: PaperSummary) {
+  if (!window.confirm(t('material.papers.deleteConfirm'))) return
   try {
-    const { set_id } = await api.createSet(
-      material.value.id,
-      newMode.value,
-      blankCount.value,
-      newMode.value === 'manual' ? manualText.value || undefined : undefined,
-    )
-    const created = await api.getSet(set_id)
-    if (created.blank_count < blankCount.value) {
-      showToast(
-        t('material.sets.fewer', { n: created.blank_count }),
-        'info',
-        7000,
-      )
-    } else {
-      showToast(t('material.sets.created'))
-    }
+    await api.deletePaper(paper.id)
+    showToast(t('material.papers.deleted'))
     await load()
-    void router.push(`/practice/${set_id}`)
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
-  } finally {
-    generating.value = false
   }
 }
 
-async function removeSet(id: string) {
-  if (!window.confirm(t('material.sets.deleteConfirm'))) return
+async function togglePaperAttempts(paper: PaperSummary) {
+  if (expandedPaperId.value === paper.id) {
+    expandedPaperId.value = null
+    return
+  }
+  expandedPaperId.value = paper.id
+  expandedAttemptId.value = null
+  if (attemptsByPaper.value[paper.id]) return
   try {
-    await api.deleteSet(id)
-    await load()
-    showToast(t('material.sets.deleted'))
+    attemptsByPaper.value[paper.id] = await api.listPaperAttempts(paper.id)
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
   }
+}
+
+async function toggleAttemptDetail(attempt: PaperAttemptSummary) {
+  if (expandedAttemptId.value === attempt.id) {
+    expandedAttemptId.value = null
+    return
+  }
+  expandedAttemptId.value = attempt.id
+  if (detailByAttempt.value[attempt.id]) return
+  try {
+    detailByAttempt.value[attempt.id] = await api.getAttempt(attempt.id)
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : String(err), 'error')
+  }
+}
+
+function attemptOk(detail: PaperAttemptDetail): number {
+  return detail.items.filter((i) => i.correct).length
 }
 
 async function saveTranscript() {
@@ -210,65 +243,83 @@ onMounted(load)
 
       <section class="card">
         <div class="cardtitle">
-          <h2>{{ t('material.sets.title') }}</h2>
+          <h2>{{ t('material.papers.title') }}</h2>
+          <button class="big" type="button" @click="generatePaper">
+            <Icon name="spark" :size="14" />
+            {{ t('paper.generate') }}
+          </button>
         </div>
 
-        <div v-if="material.sets.length" class="sets">
-          <article v-for="s in material.sets" :key="s.id" class="set-row">
-            <div class="set-main">
-              <div class="set-title">
-                {{ modeLabel(s.mode) }}
-                <span v-if="s.stale" class="chip warn">{{ t('material.sets.stale') }}</span>
+        <div v-if="papers.length" class="papers">
+          <article v-for="p in papers" :key="p.id" class="paper-row">
+            <div class="paper-main">
+              <div class="paper-title">
+                <span v-for="b in p.blocks" :key="b.type" class="chip">
+                  {{ typeNameOf(b.type) }} ×{{ b.count }}
+                </span>
+                <span v-if="p.stale" class="chip warn">{{ t('paper.stale') }}</span>
               </div>
-              <div class="set-meta">
-                <span>{{ tn('common.questions', s.blank_count, { n: s.blank_count }) }}</span>
+              <div class="paper-meta">
+                <span>{{ tn('common.questions', p.item_count, { n: p.item_count }) }}</span>
                 <span class="dot" aria-hidden="true">·</span>
-                <span>{{ fmtDateTime(s.created_at) }}</span>
+                <span>{{ fmtDateTime(p.created_at) }}</span>
               </div>
             </div>
             <div class="row">
-              <button type="button" @click="router.push(`/practice/${s.id}`)">{{ t('material.sets.start') }}</button>
+              <button class="open" type="button" @click="openPaper(p)">
+                {{ t('material.papers.open') }}
+              </button>
+              <button
+                class="ghost small attempts"
+                type="button"
+                @click="togglePaperAttempts(p)"
+              >
+                {{ t('material.papers.attempts') }}
+              </button>
               <button
                 class="icon-btn"
                 type="button"
-                :title="t('material.sets.delete')"
-                :aria-label="t('material.sets.delete')"
-                @click="removeSet(s.id)"
+                :title="t('material.papers.delete')"
+                :aria-label="t('material.papers.delete')"
+                @click="removePaper(p)"
               >
                 <Icon name="trash" :size="14" />
               </button>
             </div>
+
+            <div v-if="expandedPaperId === p.id" class="paper-attempts">
+              <template v-if="attemptsByPaper[p.id]?.length">
+                <div v-for="a in attemptsByPaper[p.id]" :key="a.id" class="attempt-wrap">
+                  <button class="attempt-row" type="button" @click="toggleAttemptDetail(a)">
+                    <span>{{ fmtDateTime(a.created_at) }}</span>
+                    <span class="attempt-meta">
+                      {{ tn('common.questions', a.item_count, { n: a.item_count }) }}
+                    </span>
+                  </button>
+                  <div v-if="expandedAttemptId === a.id && detailByAttempt[a.id]" class="attempt-detail">
+                    <span class="chip ok">
+                      {{ t('material.papers.attempt.score', {
+                        ok: attemptOk(detailByAttempt[a.id]),
+                        total: detailByAttempt[a.id].items.length,
+                      }) }}
+                    </span>
+                    <span
+                      v-for="i in detailByAttempt[a.id].items"
+                      :key="i.item_number"
+                      class="chip item-chip"
+                      :class="i.correct ? 'ok' : 'bad'"
+                      :title="i.expected"
+                    >
+                      {{ i.item_number }}
+                    </span>
+                  </div>
+                </div>
+              </template>
+              <div v-else class="empty-tip">{{ t('material.papers.attempts.empty') }}</div>
+            </div>
           </article>
         </div>
-        <div v-else class="empty-tip">{{ t('material.sets.empty') }}</div>
-
-        <div class="gen-form">
-          <label class="field">
-            <span class="tag">{{ t('material.generate.mode') }}</span>
-            <select v-model="newMode">
-              <option v-for="m in modes" :key="m.value" :value="m.value">{{ m.label }}</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="tag">{{ t('material.generate.count') }}</span>
-            <input v-model.number="blankCount" type="number" min="1" max="40" />
-          </label>
-          <button class="big" type="button" :disabled="generating" @click="createSet">
-            <Icon name="spark" :size="14" />
-            {{ generating ? t('material.generate.creating') : t('material.generate.create') }}
-          </button>
-          <button class="ghost" type="button" @click="router.push(`/paper/${material.id}`)">
-            <Icon name="book" :size="14" />
-            {{ t('paper.open') }}
-          </button>
-        </div>
-
-        <textarea
-          v-if="newMode === 'manual'"
-          v-model="manualText"
-          class="manual-input"
-          :placeholder="t('material.manual.placeholder')"
-        />
+        <div v-else class="empty-tip">{{ t('material.papers.empty') }}</div>
       </section>
 
       <section class="card">
@@ -317,29 +368,6 @@ onMounted(load)
           <template v-else>{{ t('material.transcript.hintPlain') }}</template>
           {{ t('material.transcript.hintAlign') }}
         </p>
-      </section>
-
-      <section class="card">
-        <h2>{{ t('material.attempts.title') }}</h2>
-        <div v-if="!attempts.length" class="empty-tip">{{ t('material.attempts.empty') }}</div>
-        <table v-else class="data">
-          <thead>
-            <tr>
-              <th>{{ t('material.attempts.time') }}</th>
-              <th>{{ t('material.attempts.mode') }}</th>
-              <th>{{ t('material.attempts.score') }}</th>
-              <th>{{ t('material.attempts.duration') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="a in attempts" :key="a.id">
-              <td>{{ fmtDateTime(a.finished_at || a.started_at) }}</td>
-              <td>{{ modeLabel(a.mode) }}</td>
-              <td>{{ t('material.attempts.scoreValue', { ok: a.ok, total: a.total, pct: pct(a.ok, a.total) }) }}</td>
-              <td>{{ a.duration_s ? t('common.seconds', { n: Math.round(a.duration_s) }) : t('common.none') }}</td>
-            </tr>
-          </tbody>
-        </table>
       </section>
     </template>
   </div>
@@ -415,14 +443,14 @@ onMounted(load)
   accent-color: var(--accent);
 }
 
-.sets {
+.papers {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-bottom: 18px;
+  margin-bottom: 4px;
 }
 
-.set-row {
+.paper-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -434,35 +462,74 @@ onMounted(load)
   background: var(--paper-2);
 }
 
-.set-title {
+.paper-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.paper-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex-wrap: wrap;
   font-size: 13.5px;
   font-weight: 500;
 }
 
-.set-meta {
+.paper-meta {
   display: flex;
   align-items: center;
   gap: 5px;
-  margin-top: 2px;
+  margin-top: 4px;
   color: var(--ink-3);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
-.gen-form {
+.paper-attempts {
+  flex-basis: 100%;
   display: flex;
-  align-items: flex-end;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding-top: 14px;
-  border-top: 1px solid var(--rule);
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--rule);
 }
 
-.manual-input {
-  margin-top: 10px;
+.attempt-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attempt-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+
+.attempt-row:hover:not(:disabled) {
+  border-color: var(--rule-strong);
+  opacity: 1;
+}
+
+.attempt-meta {
+  color: var(--ink-3);
+}
+
+.attempt-detail {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  padding-left: 4px;
 }
 
 .icon-btn {

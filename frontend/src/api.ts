@@ -133,14 +133,15 @@ export interface SettingsPatch {
   gen?: Partial<GenSettings>
 }
 
+/** One row of GET /api/materials (design §六): paper-based counts. */
 export interface MaterialListItem {
   id: string
   name: string
   duration_s: number | null
   created_at: string
   transcript_source: string
-  sets_count: number
-  best_score: number | null
+  papers_count: number
+  attempts_count: number
   last_practice: string | null
   has_audio: number | boolean
 }
@@ -297,18 +298,18 @@ export interface AttemptHistoryItem {
   duration_s: number | null
 }
 
+/** One row of GET /api/review/wrong-words (redesign §5.2): wrong items
+ * aggregated by answer text; the jump coordinates point at the most
+ * recent wrong attempt's paper, and t_start is that item's evidence
+ * start inside the stored paper (auto-seek not wired yet). */
 export interface WrongWord {
   word: string
   times_wrong: number
   last_at: string | null
   material_id: string
+  paper_id: string
+  item_number: number
   t_start: number | null
-}
-
-export interface Stats {
-  materials: number
-  attempts: number
-  avg_score: number | null
 }
 
 /* ------------------------------------------------------- full paper (exam) */
@@ -632,7 +633,6 @@ export const api = {
     request<AttemptHistoryItem[]>(`/materials/${materialId}/attempts`),
 
   getWrongWords: () => request<WrongWord[]>('/review/wrong-words'),
-  getStats: () => request<Stats>('/stats'),
 
   translate: (text: string) =>
     request<{ text: string; error?: string }>('/translate', jsonInit('POST', { text })),

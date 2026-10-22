@@ -1,11 +1,12 @@
-"""Review API: cross-material wrong-word book (spec §8).
+"""Review API: cross-material wrong-word book (spec §8, redesign §5.2).
 
-The old ``GET /api/stats`` handler (avg score over the legacy attempts
-table) moved out in Task 15: the redesign drops scores (design §5.1)
-and the by-type accuracy implementation now lives in
-``routers/stats.py``. The wrong-words book below still reads the legacy
-tables until the review endpoints are rebuilt on paper_attempt_items
-(design §5.2, P19).
+Rewritten in Task 17 on the paper data model: the book aggregates
+``paper_attempt_items`` where ``correct = 0`` by answer text, and every
+row carries the paper coordinates (paper/material/item number) plus the
+``t_start`` of the item's evidence read from the stored ``paper_json``
+-- the "点击重听" jump navigates to that paper (design §5.2). The old
+sets/dictation-table implementation died with those tables' data; the
+legacy stats handler moved to ``routers/stats.py`` in Task 15.
 """
 from __future__ import annotations
 
@@ -16,67 +17,74 @@ from fastapi import APIRouter, Request
 router = APIRouter()
 
 
+def _evidence_start(paper_cache: dict[str, dict], conn, paper_id: str,
+                    item_number: int) -> float | None:
+    """t_start of the item's first evidence span, from the stored paper
+    JSON (answers/evidence are embedded in the paper, §5.1). Cached per
+    paper; unknown numbers (paper edited?) simply yield None."""
+    paper = paper_cache.get(paper_id)
+    if paper is None:
+        row = conn.execute(
+            "SELECT paper_json FROM papers WHERE id=?", (paper_id,)
+        ).fetchone()
+        paper = json.loads(row["paper_json"]) if row else {}
+        paper_cache[paper_id] = paper
+    for group in paper.get("groups") or []:
+        for item in group.get("items") or []:
+            if item.get("number") == item_number:
+                evidence = item.get("evidence") or []
+                if evidence:
+                    return evidence[0].get("t_start")
+                return None
+    return None
+
+
 @router.get("/review/wrong-words")
 def wrong_words(request: Request):
+    """Wrong items aggregated by answer text (design §六 ReviewView row).
+    Each row keeps the MOST RECENT wrong occurrence's coordinates so the
+    replay button jumps to a paper that still contains the item."""
     conn = request.app.state.conn
-    items: dict[tuple[str, str], dict] = {}
-
-    # blank-based wrongs
     rows = conn.execute(
         """
-        SELECT b.answer AS word, COUNT(*) AS times_wrong,
-               MAX(a.finished_at) AS last_at, a.material_id AS material_id,
-               MAX(b.t_start) AS t_start
-        FROM attempt_items ai
-        JOIN attempts a ON ai.attempt_id = a.id
-        JOIN blanks b ON ai.blank_id = b.id
-        WHERE ai.correct = 0
-        GROUP BY b.answer, a.material_id
+        SELECT i.expected, i.item_number, a.paper_id, a.material_id,
+               a.created_at
+        FROM paper_attempt_items i
+        JOIN paper_attempts a ON i.attempt_id = a.id
+        WHERE i.correct = 0 AND i.expected IS NOT NULL AND i.expected != ''
+        ORDER BY a.created_at
         """
     ).fetchall()
+
+    paper_cache: dict[str, dict] = {}
+    items: dict[str, dict] = {}
     for r in rows:
-        items[(r["word"], r["material_id"])] = dict(r)
+        word = r["expected"]
+        entry = items.get(word)
+        if entry is None:
+            entry = {
+                "word": word,
+                "times_wrong": 0,
+                "last_at": r["created_at"],
+                "material_id": r["material_id"],
+                "paper_id": r["paper_id"],
+                "item_number": r["item_number"],
+                "t_start": _evidence_start(
+                    paper_cache, conn, r["paper_id"], r["item_number"]
+                ),
+            }
+            items[word] = entry
+        entry["times_wrong"] += 1
+        # rows arrive in created_at order, so the last one seen is the
+        # most recent: refresh the jump coordinates as we go.
+        entry["last_at"] = r["created_at"]
+        entry["material_id"] = r["material_id"]
+        entry["paper_id"] = r["paper_id"]
+        entry["item_number"] = r["item_number"]
+        entry["t_start"] = _evidence_start(
+            paper_cache, conn, r["paper_id"], r["item_number"]
+        )
 
-    # dictation wrongs (word_index based; resolve timestamps per material)
-    d_rows = conn.execute(
-        """
-        SELECT ai.expected AS word, a.material_id AS material_id,
-               ai.word_index AS word_index, a.finished_at AS last_at
-        FROM attempt_items ai
-        JOIN attempts a ON ai.attempt_id = a.id
-        WHERE ai.correct = 0 AND ai.blank_id IS NULL AND ai.expected != ''
-        """
-    ).fetchall()
-    if d_rows:
-        words_cache: dict[str, list] = {}
-        for r in d_rows:
-            mid = r["material_id"]
-            if mid not in words_cache:
-                mrow = conn.execute(
-                    "SELECT words_json FROM materials WHERE id=?", (mid,)
-                ).fetchone()
-                words_cache[mid] = json.loads(mrow["words_json"]) if mrow else []
-            words = words_cache[mid]
-            t_start = None
-            idx = r["word_index"]
-            if idx is not None and 0 <= idx < len(words):
-                t_start = words[idx].get("s")
-            key = (r["word"], mid)
-            entry = items.get(key)
-            if entry is None:
-                entry = {
-                    "word": r["word"],
-                    "times_wrong": 0,
-                    "last_at": r["last_at"],
-                    "material_id": mid,
-                    "t_start": t_start,
-                }
-                items[key] = entry
-            entry["times_wrong"] += 1
-            if r["last_at"] and (not entry["last_at"] or r["last_at"] > entry["last_at"]):
-                entry["last_at"] = r["last_at"]
-
-    out = sorted(
+    return sorted(
         items.values(), key=lambda x: (-x["times_wrong"], x["word"])
     )
-    return out

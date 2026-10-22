@@ -36,16 +36,19 @@ def _get_material(conn, material_id: str):
 
 @router.get("/materials")
 def list_materials(request: Request, q: str = ""):
+    """The library list (design §六 LibraryView row): paper-based counts.
+    The sets-era columns (sets_count/best_score) died with the score
+    concept -- counts now come from papers/paper_attempts."""
     conn = request.app.state.conn
     like = f"%{q}%"
     rows = conn.execute(
         """
         SELECT m.id, m.name, m.duration_s, m.created_at, m.transcript_source,
-               (SELECT COUNT(*) FROM question_sets s
-                 WHERE s.material_id = m.id) AS sets_count,
-               (SELECT MAX(CAST(a.ok AS REAL) / a.total) FROM attempts a
-                 WHERE a.material_id = m.id AND a.total > 0) AS best_score,
-               (SELECT MAX(a.finished_at) FROM attempts a
+               (SELECT COUNT(*) FROM papers p
+                 WHERE p.material_id = m.id) AS papers_count,
+               (SELECT COUNT(*) FROM paper_attempts a
+                 WHERE a.material_id = m.id) AS attempts_count,
+               (SELECT MAX(a.created_at) FROM paper_attempts a
                  WHERE a.material_id = m.id) AS last_practice,
                (m.audio_path IS NOT NULL) AS has_audio
         FROM materials m
