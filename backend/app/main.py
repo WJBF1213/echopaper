@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import db, i18n
 from app.config import REPO_ROOT, load_settings
+from . import __version__ as VERSION
 from app.routers import (
     asr as asr_router,
     attempts as attempts_router,
@@ -29,8 +30,6 @@ from app.routers import (
     translate as translate_router,
 )
 from app.services import engines, jobs as jobs_svc, translate_svc
-
-VERSION = "1.0.0"
 
 
 def create_app(

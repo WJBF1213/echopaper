@@ -1,10 +1,10 @@
-# 雅思听力挖空练习
+# EchoPaper
 
 [English](README.md) | 中文
 
 > 本文是英文 [README.md](README.md) 的中文翻译；若两者内容不一致，以英文版为准。
 
-本地优先的雅思听力练习应用：上传听力音频 → 本地语音识别（词级时间戳）→
+本地优先的 IELTS 风格听力练习应用：上传听力音频 → 本地语音识别（词级时间戳）→
 混合出题（挖空题）→ 在浏览器中配合音频练习。
 
 ```
@@ -318,7 +318,7 @@ README.zh-CN.md         本中文 README
 
 ## 许可证
 
-[MIT](LICENSE) © 2026 IELTS Listening Cloze contributors。
+[MIT](LICENSE) © 2026 EchoPaper contributors。
 
 欢迎贡献——请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。请勿提交 API 密钥、
 `data/` 或受版权保护的音频（`test_sound/`）；安全相关说明见

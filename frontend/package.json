@@ -1,7 +1,7 @@
 {
-  "name": "ielts-listening-cloze-frontend",
+  "name": "echopaper",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

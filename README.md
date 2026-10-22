@@ -1,10 +1,11 @@
-# IELTS Listening Cloze
+# EchoPaper
 
 English | [中文](README.zh-CN.md)
 
-A local-first IELTS listening practice app: upload listening audio, transcribe it
-locally with word-level timestamps, generate cloze (fill-in-the-blank) questions,
-and practise in the browser with synchronized playback.
+A local-first IELTS-style listening practice app: upload listening audio,
+transcribe it locally with word-level timestamps, generate cloze
+(fill-in-the-blank) questions, and practise in the browser with synchronized
+playback.
 
 ```
 audio upload ──► local ASR (word timestamps) ──► hybrid question generation ──► browser practice
@@ -352,7 +353,7 @@ app. Their data is not compatible with the new backend:
 
 ## License
 
-[MIT](LICENSE) © 2026 IELTS Listening Cloze contributors.
+[MIT](LICENSE) © 2026 EchoPaper contributors.
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Please do not
 commit API keys, `data/`, or copyrighted audio (`test_sound/`); see
