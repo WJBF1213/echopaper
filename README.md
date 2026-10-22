@@ -13,9 +13,10 @@ audio upload ──► local ASR (word timestamps) ──► hybrid question gen
                                                   └─ code validates verbatim anchors
 ```
 
-The backend is FastAPI; the frontend is a Vue 3 SPA whose build output
-(`frontend/dist/`) is committed and served by the backend. No Node.js is needed
-to run the packaged app.
+The backend is FastAPI; the frontend is a Vue 3 SPA served by the backend
+from `frontend/dist/`. That directory is not tracked by Git — prebuilt
+bundles ship via GitHub Releases, and running from source requires one
+`npm run build` (see [Manual setup](#manual-setup)).
 
 ## Features
 
@@ -76,8 +77,9 @@ Common requirements:
 
 - **Python 3.10+**
 - **ffmpeg** on `PATH` (audio decoding for all ASR engines)
-- **Node.js 20.19+ (or 22.12+)** only if you develop or rebuild the frontend
-  (Vite 7 requirement); the committed `frontend/dist/` is enough to run the app.
+- **Node.js 20.19+ (or 22.12+)** when you build the frontend from source
+  (Vite 7 requirement); a prebuilt bundle from the Releases page runs the
+  app without Node.js.
 
 ## Quick start
 
@@ -325,7 +327,8 @@ frontend/src/           Vue 3 SPA
   i18n/                 Dependency-free i18n layer and zh/en catalogs
   views/ components/    UI
   composables/ lib/     player, polling, helpers
-frontend/dist/          Committed build output, served by the backend
+frontend/dist/          Build output served by the backend (not tracked;
+                        build with npm run build or unpack a Release bundle)
 data/                   Runtime: app.db, audio/, incoming/ (ignored by Git)
 .models/                Hugging Face model cache (ignored by Git)
 docs/                   Design and implementation docs (mostly Chinese)

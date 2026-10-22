@@ -20,6 +20,9 @@ coverage.xml
 node_modules/
 frontend/node_modules/
 
+# Frontend build output — prebuilt bundles ship via GitHub Releases
+/frontend/dist/
+
 # Logs and local environment overrides
 *.log
 .env

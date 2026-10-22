@@ -14,8 +14,9 @@
                                        └─ 代码硬校验逐字锚定
 ```
 
-后端为 FastAPI；前端为 Vue 3 SPA，其构建产物 `frontend/dist/` 已入库并由后端
-静态托管，因此运行打包好的应用不需要 Node.js。
+后端为 FastAPI；前端为 Vue 3 SPA，由后端静态托管其构建产物 `frontend/dist/`。
+该目录不入库——预构建包随 GitHub Release 附带；从源码运行需先执行一次
+`npm run build`（见[手动安装](#手动安装)）。
 
 ## 功能
 
@@ -66,8 +67,8 @@ Windows 与 macOS 均受支持。Intel Mac 和 Linux 可运行应用，并使用
 
 - **Python 3.10+**
 - **ffmpeg** 在 `PATH` 中（所有 ASR 引擎解码音频都需要）
-- **Node.js 20.19+（或 22.12+）**：仅在开发或重新构建前端时需要（Vite 7 要求）；
-  已入库的 `frontend/dist/` 足以运行应用。
+- **Node.js 20.19+（或 22.12+）**：从源码构建前端时需要（Vite 7 要求）；
+  Release 附带的预构建包无需 Node.js 即可运行。
 
 ## 快速开始
 
@@ -293,7 +294,8 @@ frontend/src/           Vue 3 SPA
   i18n/                 无依赖 i18n 层与 zh/en 目录
   views/ components/    界面
   composables/ lib/     播放器、轮询、工具函数
-frontend/dist/          已入库的构建产物，由后端托管
+frontend/dist/          构建产物，由后端托管（不入库；npm run build
+                        或使用 Release 附带的预构建包）
 data/                   运行时：app.db、audio/、incoming/（Git 忽略）
 .models/                Hugging Face 模型缓存（Git 忽略）
 docs/                   设计与实现文档（以中文为主）
