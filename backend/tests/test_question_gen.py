@@ -213,6 +213,79 @@ def test_candidate_hint_excludes_out_of_range_spans():
     assert "6-7" not in hint
 
 
+@pytest.mark.asyncio
+async def test_llm_picks_can_be_swapped_to_reach_quota(monkeypatch):
+    """Accepted LLM picks may block every remaining candidate.
+
+    Appending a pool candidate then cannot reach the requested count even
+    though a different combination can. The final selection must be able to
+    drop a pick to gain a slot instead of returning a short set.
+    """
+    words = [f"w{i}" for i in range(70)]
+    wj = _wj(words)
+    sents = [[0, len(words) - 1]]
+
+    # Candidates: the LLM's five picks block three pool-only spans, but
+    # 37 / 46-47 / 55-56 together with 17, 24-25 and 62 form a valid six.
+    pool = [
+        {"i0": 17, "i1": 17, "type": "noun", "score": 34},
+        {"i0": 24, "i1": 25, "type": "noun", "score": 62},
+        {"i0": 37, "i1": 37, "type": "noun", "score": 30},
+        {"i0": 40, "i1": 41, "type": "noun", "score": 38},
+        {"i0": 46, "i1": 47, "type": "noun", "score": 52},
+        {"i0": 50, "i1": 51, "type": "noun", "score": 52},
+        {"i0": 55, "i1": 56, "type": "number", "score": 103},
+        {"i0": 62, "i1": 62, "type": "number", "score": 85},
+    ]
+    monkeypatch.setattr(
+        qg.pos, "build_candidates", lambda *a, **k: [dict(c) for c in pool]
+    )
+
+    chat = FakeChat(
+        [
+            {
+                "items": [
+                    {"i0": 17, "i1": 17},
+                    {"i0": 24, "i1": 25},
+                    {"i0": 40, "i1": 41},
+                    {"i0": 50, "i1": 51},
+                    {"i0": 62, "i1": 62},
+                ]
+            }
+        ]
+    )
+    result = await generate_set(
+        wj, sents, 6,
+        llm_cfg={"provider": "zhipu", "api_key": "k"},
+        chat_json_fn=chat,
+        tag_words_fn=lambda _w: [[] for _ in _w],
+    )
+
+    starts = [b.word_start for b in result.blanks]
+    assert len(result.blanks) == 6, starts
+    # The blocking picks (40-41 and 50-51) must have been swapped out.
+    assert 40 not in starts and 50 not in starts
+    # LLM picks that survived keep the set marked as LLM-sourced.
+    assert result.source == "llm"
+    for a, b in zip(result.blanks, result.blanks[1:]):
+        assert b.word_start - a.word_end - 1 >= 5
+
+
+@pytest.mark.asyncio
+async def test_llm_picks_win_when_they_fit():
+    words = "The little castle stands near the river".split()
+    wj = _wj(words)
+    sents = [[0, len(words) - 1]]
+    chat = FakeChat([{"items": [{"i0": 2, "i1": 2}]}])
+    result = await generate_set(
+        wj, sents, 1,
+        llm_cfg={"provider": "zhipu", "api_key": "k"},
+        chat_json_fn=chat,
+    )
+    assert result.blanks[0].answer == "castle"
+    assert result.source == "llm"
+
+
 def test_fallback_prefers_higher_ranked_compatible_pair():
     candidates = [
         {"i0": 10, "i1": 10, "type": "noun"},  # rank 1, conflicts with #2/#3

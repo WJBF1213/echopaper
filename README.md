@@ -24,6 +24,7 @@
 - **按需加载 / 空闲卸载**：引擎对象仅在首个转写任务时加载（秒级）；空闲 `ASR_IDLE_UNLOAD_MIN`（默认 10 分钟，0=常驻）自动 `del + gc` 释放约 1.2-2GB；`POST /api/asr/unload` 可手动立即卸载。转写与切换/卸载经异步锁串行化。
 - **混合出题**：spaCy 候选池（名词为主）→ LLM 单次调用按词索引选空（默认智谱 GLM-4.7-Flash 免费，支持 dashscope/deepseek/任意 OpenAI 兼容自定义）→ 代码硬校验（答案必须逐字锚定转写、间距≥5词、顺序、非句首）→ 不足时代码补齐。无 API key 时纯程序化名词档。
   - **LLM 上下文纪律**：单次调用总上下文硬上限 **256k tokens（262144）**，即使模型标称更大也不允许（防超长上下文性能衰减）；超预算按句分块独立调用；**每个听力材料 = 独立无状态会话**，绝不携带跨材料历史。
+- **批量导入**：材料库可一次选多个音频（单批上限 50），逐文件显示转写/出题进度；可选「顺便出题」，失败项可展开完整原因并在批次历史里回看。
 - **记忆与回顾**：材料（音频+转写+词级时间戳）、题集、每次作答、错词本全在 `data/app.db` + `data/audio/`；`GET /api/review/wrong-words` 跨材料聚合错词并带时间戳（点击即可回跳重听）。
 - **批量转写与存储**：材料库「批量转写」可一次多选最多 50 个音频；后端把每个文件流式暂存到 `data/incoming/`，再逐文件排队做 ASR，完成后各自成为独立材料（音频落到 `data/audio/`、词级时间戳与原文写入 SQLite）。默认只转写入库，勾选「转写后顺便出题」才会逐材料生成题集。批次进度逐文件显示，失败互不影响；`GET /api/batches[/{id}]` 可查最近批次与每个文件的阶段。服务重启会把中断中的任务标为失败并清理未入库的暂存文件，避免批次永远停在“识别中”。
 - **原文时间戳与直接回放**：材料详情与练习页的原文按句分行，**每句开头显示句首时间戳**（可隐藏）；点击时间戳从该句开头播放并 AB 循环，点击任意单词从该词播放，播放中的词实时高亮。练习时点题号仍会跳到答案词前 1.5 秒并循环整句；纯文本材料（无词级时间戳）不显示时间戳、不响应点击。
@@ -54,10 +55,10 @@ POST /api/translate                   逐句中译（gtx→MyMemory→LLM 兜底
 
 ```bash
 python -m venv .venv && .venv/Scripts/pip install -r backend/requirements.txt -r backend/requirements-dev.txt   # macOS 用 .venv/bin/pip
-.venv/Scripts/python -m pytest backend/tests -q        # 139 个测试，全部 mock 引擎/LLM/网络，无需 macOS
+.venv/Scripts/python -m pytest backend/tests -q        # 141 个测试，全部 mock 引擎/LLM/网络，无需 macOS
 cd backend && ../.venv/Scripts/python -m app.main      # 本机起服务（127.0.0.1:8300）
 
-cd frontend && npm install && npm test && npm run build   # 43 个 Vitest；产物 dist/ 入库
+cd frontend && npm install && npm test && npm run build   # 56 个 Vitest；产物 dist/ 入库
 cd frontend && npm run dev                             # 前端热更新（:5173，/api 代理到 :8300）
 ```
 
@@ -85,7 +86,7 @@ macOS-only 依赖（mlx-whisper/parakeet-mlx）带 `sys_platform == "darwin"` �
 
 ```
 backend/app/          FastAPI 应用（routers/ + services/，services 不依赖 fastapi 便于移植）
-backend/tests/        139 个 pytest（引擎/LLM/网络全 mock）
+backend/tests/        141 个 pytest（引擎/LLM/网络全 mock）
 frontend/src/         Vue 3 SPA（views/ components/ composables/ lib/）
 frontend/dist/        构建产物（入库，后端静态托管）
 data/                 运行时生成：app.db + audio/

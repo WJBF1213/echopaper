@@ -18,6 +18,15 @@ const summary = computed(() => {
   return parts.join(' · ')
 })
 
+/** Red is reserved for "this run went wrong", not for "we got to 100%". */
+const tone = computed(() => {
+  const { done, error, running } = props.batch
+  if (running) return ''
+  if (error && !done) return 'bad'
+  if (error) return 'warn'
+  return 'ok'
+})
+
 function label(state: JobState): string {
   switch (state) {
     case 'queued':
@@ -36,16 +45,22 @@ function label(state: JobState): string {
       return state
   }
 }
+
+/** The first clause is usually the actual cause; the rest is remediation. */
+function shortError(message: string | null): string {
+  const text = message || '处理失败'
+  const cut = text.split('；')[0] ?? text
+  return cut.length > 56 ? `${cut.slice(0, 55)}…` : cut
+}
 </script>
 
 <template>
   <section class="card batch" role="status" aria-live="polite">
     <div class="cardtitle">
       <h2>批量导入 · {{ batch.name }}</h2>
-      <span class="pct">{{ Math.round(percent) }}%</span>
+      <span class="hint">{{ summary }}</span>
     </div>
-    <p class="hint">{{ summary }}</p>
-    <div class="progress" style="margin-top: 8px">
+    <div class="progress" :class="tone">
       <div :style="{ width: `${percent}%` }" />
     </div>
 
@@ -60,7 +75,10 @@ function label(state: JobState): string {
         </span>
         <span class="fname" :title="job.file_name || ''">{{ job.file_name || '未命名文件' }}</span>
         <span v-if="job.state === 'error'" class="err" :title="job.message || ''">
-          {{ job.message || '处理失败' }}
+          <details>
+            <summary>{{ shortError(job.message) }}</summary>
+            <p>{{ job.message || '处理失败' }}</p>
+          </details>
         </span>
         <span v-else-if="job.state !== 'done'" class="pct-small">
           {{ Math.round(job.percent || 0) }}%
@@ -81,10 +99,16 @@ function label(state: JobState): string {
   margin-top: 12px;
 }
 
-.pct {
-  color: var(--ink-3);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
+.progress.ok > div {
+  background: var(--ok);
+}
+
+.progress.warn > div {
+  background: var(--warn);
+}
+
+.progress.bad > div {
+  background: var(--accent);
 }
 
 .jobs {
@@ -120,10 +144,43 @@ function label(state: JobState): string {
 }
 
 .err {
-  max-width: 46%;
+  max-width: 52%;
+  color: var(--accent);
+}
+
+.err details {
+  cursor: pointer;
+}
+
+.err summary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--accent);
+  list-style: none;
+}
+
+.err summary::-webkit-details-marker {
+  display: none;
+}
+
+.err summary::marker {
+  content: '';
+}
+
+.err summary::after {
+  content: ' ▾';
+  color: var(--ink-3);
+}
+
+.err p {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 </style>

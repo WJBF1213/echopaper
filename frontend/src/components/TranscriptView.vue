@@ -60,14 +60,15 @@ function wordAt(wordIndex: number): Word | undefined {
           @click.stop="emit('seekSentence', sentenceIndex)"
         >{{ fmtTime(timeOf(range[0])) }}</button>
         <template v-for="wi in range[1] - range[0] + 1" :key="wi">
-          <span
-            v-if="wordAt(range[0] + wi - 1)"
-            class="word"
-            :class="{ active: timed && range[0] + wi - 1 === active, clickable: timed }"
-            :data-word-index="range[0] + wi - 1"
-            :title="timed ? `${fmtTime(timeOf(range[0] + wi - 1))} 起播放` : undefined"
-            @click="timed && emit('seekWord', range[0] + wi - 1)"
-          >{{ wordAt(range[0] + wi - 1)?.w }}</span>
+          <template v-if="wordAt(range[0] + wi - 1)">
+            <span
+              class="word"
+              :class="{ active: timed && range[0] + wi - 1 === active, clickable: timed }"
+              :data-word-index="range[0] + wi - 1"
+              :title="timed ? `${fmtTime(timeOf(range[0] + wi - 1))} 起播放` : undefined"
+              @click="timed && emit('seekWord', range[0] + wi - 1)"
+            >{{ wordAt(range[0] + wi - 1)?.w }}</span>{{ wi < range[1] - range[0] + 1 ? ' ' : '' }}
+          </template>
         </template>
       </p>
     </template>

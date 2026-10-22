@@ -214,7 +214,8 @@ describe('LibraryView', () => {
     await flushPromises()
 
     expect(mocked.getBatch).toHaveBeenCalledTimes(2)
-    expect(wrapper.find('.batch').text()).toContain('100%')
+    expect(wrapper.find('.batch').text()).toContain('2/2 完成')
+    expect(wrapper.find('.batch .progress').classes()).toContain('ok')
     expect(wrapper.findAll('.batch .jobrow')).toHaveLength(2)
     expect(wrapper.findAll('.batch .jobrow button')).toHaveLength(2)
     wrapper.unmount()

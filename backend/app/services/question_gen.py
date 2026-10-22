@@ -473,27 +473,30 @@ async def generate_set(
             except LlmError:
                 pass
 
-    merged = _enforce_global(llm_items, blank_count)
-    if merged:
-        used_llm = True
+    # Final selection. LLM picks carry a large bonus so they win whenever
+    # they fit, but they are not locked: two accepted picks can block each
+    # other's neighbours, and appending a pool candidate then cannot reach
+    # the requested count even though a different combination can. The DP
+    # fills the quota first, then maximises preference, so it may swap one
+    # LLM pick out to gain a slot.
+    LLM_BONUS = 1000
+    preferred: dict[tuple[int, int], dict] = {}
+    for it in llm_items:
+        key = (int(it["i0"]), int(it["i1"]))
+        preferred.setdefault(key, {**it, "score": LLM_BONUS})
+    used_llm = bool(preferred)
 
-    # fallback fill from the candidate pool (max-weight set under the gap
-    # constraint, not a greedy rank scan — see select_fallback)
-    shortfall = blank_count - len(merged)
-    if shortfall > 0:
-        picked = select_fallback(candidates, merged, shortfall)
-        for cand in picked:
-            merged.append(
-                {
-                    "i0": cand["i0"],
-                    "i1": cand["i1"],
-                    "answer": cand.get("answer"),
-                    "type": cand["type"],
-                    "alternatives": cand.get("alternatives"),
-                    "word_limit": cand.get("word_limit"),
-                }
-            )
-        merged = _enforce_global(merged, blank_count)
+    combined: list[dict] = list(preferred.values())
+    for cand in candidates:
+        key = (int(cand["i0"]), int(cand.get("i1", cand["i0"])))
+        if key in preferred:
+            continue
+        combined.append({**cand, "score": int(cand.get("score", 0))})
+
+    merged = select_fallback(combined, [], blank_count)
+    used_llm = used_llm and any(
+        (int(it["i0"]), int(it["i1"])) in preferred for it in merged
+    )
 
     if not merged:
         raise QuestionGenError(
