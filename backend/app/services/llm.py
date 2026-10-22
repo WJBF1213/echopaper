@@ -234,8 +234,10 @@ async def _chat_json_core(
 ) -> tuple[dict, ChatUsage]:
     """Stateless JSON call with one retry round appending the failure
     reason to the LAST message (prefix stability: earlier messages are
-    never rewritten). Structural validation is the caller's job — the
-    schema hint travels inside the prompt itself."""
+    never rewritten). The parsed result is guaranteed to be a dict —
+    top-level arrays/strings are treated as parse failures and retried.
+    Deeper structural validation is the caller's job; the schema hint
+    travels inside the prompt itself."""
     base_url, model, api_key = resolve(cfg)
     if client is None:
         client = _shared_http_client()
@@ -251,7 +253,13 @@ async def _chat_json_core(
                 client, base_url, model, api_key, [dict(m) for m in msgs],
                 max_tokens, temperature, json_mode=True,
             )
-            return _extract_json(content), usage
+            obj = _extract_json(content)
+            if not isinstance(obj, dict):
+                # A provider ignoring response_format may answer with a
+                # top-level array/string; callers .get() on the result, so
+                # treat it as a parse failure and retry with the reason.
+                raise ValueError("top-level JSON was not an object")
+            return obj, usage
         except (ValueError, LlmError) as exc:
             last_error = str(exc)
             msgs[-1] = {

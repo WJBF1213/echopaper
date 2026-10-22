@@ -391,6 +391,34 @@ def _schema_hint(qtype: QuestionType) -> str:
 # prefix ordered by stability: system (global) -> stable frame (per
 # material: transcript + candidates) -> task frame (per request).
 
+#: Registry keys of the per-type rules texts. Types registered in
+#: ``exam_presets`` after a registry migration fall back to their preset
+#: text until they are added to the registry.
+_RULES_KEYS = {
+    spec.key for spec in prompts.ALL_PROMPTS if spec.category == "rules"
+}
+
+
+def _rules_text(conn, qtype: QuestionType, lang: str) -> str:
+    """Per-type rules text from the prompt registry (overrides apply).
+
+    The registry derives each spec's variables from its default text:
+    completion-type rules carry ``{{max_words}}`` (the legacy templates'
+    ``{max_words}``), the other types declare none. Exactly those
+    variables are supplied, with the preset's ``max_words`` value, so a
+    default (non-overridden) render is byte-identical to the legacy
+    ``qtype.rules(lang)`` text.
+    """
+    if f"exam.rules.{qtype.key}.{lang}" not in _RULES_KEYS:
+        return qtype.rules(lang)
+    legacy = qtype.rules_zh if lang == "zh" else qtype.rules_en
+    variables: dict[str, int] = {}
+    if "{max_words}" in legacy:
+        variables["max_words"] = qtype.max_words
+    return prompts.render_prompt(
+        conn, f"exam.rules.{qtype.key}", lang, **variables
+    )
+
 
 # -------------------------------------------------------------- validation
 
@@ -896,7 +924,7 @@ def _build_messages(
         if qtype.answer_kind == "span"
         else "（本题型不需要）" if lang == "zh" else "(not used for this type)"
     )
-    rules = qtype.rules(lang)
+    rules = _rules_text(conn, qtype, lang)
     if shared_options:
         # One printed option list per task: a chunk must not invent a second
         # pool, because letters from a discarded pool make the key wrong.

@@ -141,6 +141,27 @@ async def test_chat_json_tolerates_code_fences():
 
 
 @pytest.mark.asyncio
+async def test_top_level_non_dict_retried_then_dict_accepted():
+    """A provider ignoring response_format may answer with a top-level
+    array: that is a parse failure feeding the retry round, never an
+    AttributeError crash at the call site (.get on a list)."""
+    client = FakeClient([ok(json.dumps([1, 2])), ok(json.dumps({"items": []}))])
+    result = await llm.chat_json(CFG, TWO_MESSAGES, client=client)
+    assert result == {"items": []}
+    assert len(client.calls) == 2
+    # the retry carries the reason into the tail message
+    assert "not an object" in client.calls[1]["json"]["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_top_level_non_dict_always_raises_llm_error():
+    client = FakeClient([ok('["a", "b"]'), ok('"plain string"')])
+    with pytest.raises(LlmError):
+        await llm.chat_json(CFG, TWO_MESSAGES, client=client)
+    assert len(client.calls) == 2  # one retry, then LlmError — not AttributeError
+
+
+@pytest.mark.asyncio
 async def test_finish_reason_length_raises():
     resp = FakeResponse(
         {"choices": [{"message": {"content": "{}"}, "finish_reason": "length"}]}

@@ -332,3 +332,78 @@ def test_allocate_keeps_total_and_one_per_chunk():
     assert sum(exam_gen._allocate(10, [1, 2, 3])) == 10
     assert all(v >= 1 for v in exam_gen._allocate(10, [1, 2, 3]))
     assert sum(exam_gen._allocate(2, [5, 5, 5])) == 2
+
+
+# ------------------------------------------- Task 7: registry rules + §8.1 order
+
+
+def test_rules_default_text_matches_presets(tmp_db):
+    """Without overrides, registry rules render byte-identically to the
+    legacy exam_presets texts (completion types substitute max_words)."""
+    for key in (
+        "form_completion", "note_completion", "short_answer",
+        "mcq_single", "matching", "map_labelling",
+    ):
+        qtype = QUESTION_TYPES[key]
+        assert exam_gen._rules_text(tmp_db, qtype, "zh") == qtype.rules("zh")
+        assert exam_gen._rules_text(tmp_db, qtype, "en") == qtype.rules("en")
+
+
+def test_rules_override_changes_task_frame(tmp_db):
+    from app.services import prompts as prompts_svc
+
+    words, ranges = make_material(SENTENCES)
+
+    # completion type: the override's {{max_words}} gets the preset value
+    qtype = QUESTION_TYPES["form_completion"]
+    prompts_svc.set_override(
+        tmp_db, "exam.rules.form_completion.zh", "覆盖后的规则，最多 {{max_words}} 词"
+    )
+    messages = exam_gen._build_messages(
+        tmp_db, words, ranges,
+        part=1, qtype=qtype, ranges=[(0, 5)], allowed=[(0, 5)],
+        count=3, lang="zh",
+    )
+    task = messages[2]["content"]
+    assert f"覆盖后的规则，最多 {qtype.max_words} 词" in task
+    assert "答案必须是给定转写中" not in task  # default rules replaced
+
+    # non-completion type: no variables declared
+    prompts_svc.set_override(tmp_db, "exam.rules.mcq_single.zh", "覆盖-MCQ规则")
+    messages = exam_gen._build_messages(
+        tmp_db, words, ranges,
+        part=2, qtype=QUESTION_TYPES["mcq_single"], ranges=[(0, 5)],
+        allowed=[(0, 5)], count=2, lang="zh",
+    )
+    assert "覆盖-MCQ规则" in messages[2]["content"]
+
+
+def test_generate_paper_sends_three_part_messages(tmp_db):
+    """§8.1 pinned at the generator: every call is exactly
+    [system, stable frame (transcript + candidates), task frame]."""
+    words, ranges = make_material(SENTENCES)
+    captured = []
+
+    async def chat(cfg, messages, **kwargs):
+        captured.append([dict(m) for m in messages])
+        return {"groups": []}  # nothing usable; the shape is what matters
+
+    try:
+        run(
+            generate_paper(
+                tmp_db, words, ranges, part=1, preset="p1_form",
+                llm_cfg={"api_key": "test"}, chat_json_fn=chat,
+            )
+        )
+    except exam_gen.ExamGenError:
+        pass  # empty LLM responses may leave the paper empty
+
+    assert captured
+    for messages in captured:
+        assert [m["role"] for m in messages] == ["system", "user", "user"]
+        assert messages[0]["content"].startswith("你是剑桥雅思听力命题人")
+        # stable frame: transcript + candidates; task frame: rules + JSON
+        assert "可用于命题的转写内容" in messages[1]["content"]
+        assert "候选答案" in messages[1]["content"]
+        assert "题型要求" in messages[2]["content"]
+        assert "返回 JSON：" in messages[2]["content"]
