@@ -31,6 +31,14 @@ with no retry, repair or top-up), while a block that simply produced
 fewer items than requested walks the retry/top-up path and its group is
 marked ``partial``. Refusal never masquerades as shrinkage and vice
 versa.
+
+Map blocks run the two-step flow of design §4.3 (Task 12): step 1 --
+scene reconstruction -- lives in :mod:`app.services.exam_scene` (split
+out once this module passed 2000 lines); step 2 is this module's
+matching flow forced onto the scene-derived option pool, and the
+validated scene hangs on the block's groups as ``ExamGroup.visual``. A
+refused or invalid scene skips the block; the map is never degraded
+into a no-map matching task.
 """
 from __future__ import annotations
 
@@ -40,7 +48,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from app.services import llm, pos, prompts
+from app.services import exam_scene, llm, pos, prompts
 from app.services.exam_presets import QUESTION_TYPES, QuestionType
 from app.services.llm import LlmError
 
@@ -390,6 +398,10 @@ class ExamGroup:
     # §4.5): insufficiency is not refusal -- the shortfall stays visible
     # on the paper instead of shrinking silently or entering skipped.
     partial: bool = False
+    # Drawable scene JSON for visual types (design §4.3, map_labelling):
+    # {"kind": ..., "scene": {canvas, nodes, paths}} in normalized 0-100
+    # coordinates. None for every non-visual group.
+    visual: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -398,6 +410,7 @@ class ExamGroup:
             "instruction": self.instruction,
             "options": self.options,
             "partial": self.partial,
+            "visual": self.visual,
             "items": [i.to_dict() for i in self.items],
         }
 
@@ -1875,6 +1888,9 @@ def _precheck_skip_reason(
     ``GenerateResult.skipped``, never in ``paper.warnings``:
       * the transcript is under the type's ``min_words`` floor;
       * a visual (map) type has no spatial-language sentence to build on.
+        With spatial language present the block proceeds into the
+        two-step scene generation (design §4.3, ``exam_scene``): only a
+        refused or invalid reconstruction skips it, never by default.
     """
     loc = "zh" if lang == "zh" else "en"
     label = _type_name(qtype, lang)
@@ -1888,18 +1904,6 @@ def _precheck_skip_reason(
         if not has_spatial_language(words_json, sentences):
             text = prompts.PRECHECK_REASON_NO_SPATIAL[loc].format(label=label)
             return f"{tag} {text}"
-        # Spatial language is there, but the scene path is not built yet
-        # (§4.3, later task): the block still cannot run. This branch is
-        # replaced by the two-step scene generation when it lands.
-        if lang == "zh":
-            return (
-                f"{tag} {label}需要场景还原"
-                f"（地图场景随后续任务开放），本次已跳过"
-            )
-        return (
-            f"{tag} {label} needs scene restoration "
-            "(map scenes arrive in a later task); skipped for now"
-        )
     return None
 
 
@@ -1983,11 +1987,41 @@ async def generate_paper(
 
     shared_pool_by_type: dict[str, list[str]] = {}
     for ordinal, ((qtype, count), zone) in enumerate(zip(active, zones), start=1):
+        # A visual (map) block runs the two-step flow of design §4.3:
+        # step 1 reconstructs the scene (exam_scene.build_scene), step 2
+        # is this same matching flow forced onto the scene-derived option
+        # pool -- so a map block never joins the cross-block pool sharing
+        # (a second map's scene would carry different fixed labels).
+        visual: dict | None = None
         shared = (
             shared_pool_by_type.get(qtype.key)
-            if qtype.answer_kind == "matching"
+            if qtype.answer_kind == "matching" and not qtype.generates_visual
             else None
         )
+        if qtype.generates_visual:
+            visual, scene_reason = await exam_scene.build_scene(
+                conn,
+                material,
+                cfg,
+                locale=lang,
+                count=count,
+                client=client,
+                chat_fn=chat_fn,
+                usage=usage,
+                ranges=zone,
+                variation=variation,
+            )
+            if visual is None:
+                # Refused or failed hard validation: skip the block
+                # (§4.3 还原失败才跳过), never degrade to a no-map paper.
+                skipped.append({"type": qtype.key, "reason": scene_reason})
+                continue
+            shared, pool_reason = exam_scene.map_option_pool(
+                visual, words_json, sentences, loc="zh" if lang == "zh" else "en"
+            )
+            if shared is None:
+                skipped.append({"type": qtype.key, "reason": pool_reason})
+                continue
         try:
             blocks_out, block_warnings, refusal = await _generate_block(
                 conn,
@@ -2017,7 +2051,11 @@ async def generate_paper(
             continue
         paper.warnings.extend(block_warnings)
 
-        if qtype.answer_kind == "matching" and qtype.key not in shared_pool_by_type:
+        if (
+            qtype.answer_kind == "matching"
+            and not qtype.generates_visual
+            and qtype.key not in shared_pool_by_type
+        ):
             for _t, _items, options in blocks_out:
                 if options:
                     shared_pool_by_type[qtype.key] = list(options)
@@ -2035,6 +2073,7 @@ async def generate_paper(
                 instruction=_group_instruction(qtype, items),
                 items=items,
                 options=_letter_pool(options) if options else [],
+                visual=visual,
             )
             block_groups.append(group)
             paper.groups.append(group)

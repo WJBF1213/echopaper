@@ -38,6 +38,17 @@ Migration and split notes
   not a template slot. ``PROMPTS_VERSION`` moved 1 -> 2, which changes
   every LLM cache key (intended).
 
+* ``scene.user.<locale>`` (Task 12, design §4.3 step 1): the map scene
+  reconstruction prompt. It receives the block's sentences with the
+  spatial-cue ones already ordered first (the generator does the
+  ordering; the template stays dumb) plus the requested blank count, and
+  spells out the scene JSON schema and every hard-validation rule the
+  backend enforces (canvas bounds, unique ids, continuous blank_slot
+  numbering, the >= 8 node distance, per-node evidence). It ends with
+  the same refusal guidance: spatial sentences that do not cohere into
+  a scene return ``refused`` instead of a forced scene. Adding the pair
+  moved ``PROMPTS_VERSION`` 2 -> 3 (scene cache keys change with it).
+
 Rendering performs LITERAL ``str.replace`` per variable — never
 ``str.format`` or f-strings — because templates and variable values are
 full of JSON braces that would crash format-based interpolation.
@@ -55,7 +66,7 @@ from dataclasses import dataclass
 from app import db
 from app.services.exam_presets import QUESTION_TYPES
 
-PROMPTS_VERSION: int = 2
+PROMPTS_VERSION: int = 3
 
 #: settings-table key holding the ``{prompt_key: override_text}`` JSON dict.
 OVERRIDE_SETTING_KEY = "prompt_overrides"
@@ -65,8 +76,6 @@ OVERRIDE_SETTING_KEY = "prompt_overrides"
 # (design §4.5: code-level refusals that save an LLM call). They are NOT
 # LLM prompts -- never rendered into a message and not registry entries --
 # but they live here so every generation-facing text sits in one module.
-# The map *scene* texts are deliberately absent: they arrive with the
-# scene task (design §4.3).
 
 #: Prefix marking a reason as a code-level precheck (zero LLM calls).
 PRECHECK_TAG = "[precheck]"
@@ -165,6 +174,41 @@ Type requirements:
 Follow audio order with at least {{gap}} words between answers; do not cluster
 items at the very start or end.
 Return JSON: {{schema}}"""
+
+# Map scene reconstruction (design §4.3 step 1, Task 12). The generator
+# has already ordered the spatial-cue sentences to the front of
+# {{sentences}}; the template spells out the schema and every hard rule
+# the backend validator enforces, and ends with the refusal path.
+
+_SCENE_USER_ZH = """下面是转写的内容句（每行的 [起-止] 是句子的词索引范围，词前的数字是全局词索引，供 evidence 引用）；含空间描述的句子已排在前面（in/on the left、next to、opposite、at the bottom、between 等线索句优先）：
+{{sentences}}
+
+请根据说话人的空间描述还原一个可直接绘制的场景，返回场景 JSON：
+- kind：map（地图）/ plan（平面图）/ diagram（示意图）。
+- canvas：归一化画布，如 {"width": 100, "height": 70}；所有坐标必须在画布范围内。
+- nodes：场景中的位置节点，id 唯一。fixed=true 的节点已印在图上，必须带 label；空位节点不带 label，用 blank_slot 序号（从 1 开始连续编号，至少 {{count}} 个），渲染为序号圆圈。任意两个节点的距离至少 8（归一化单位），不得重叠。
+- 每个节点必须带 evidence：引用转写中支撑该位置的原词跨度（i0/i1 词索引 + quote 逐字引用），优先引用空间描述句。
+- paths：可选的连接路径，from/to 必须是已有节点 id。
+
+只返回 JSON 对象，不要解释性文字：
+{"kind":"map","scene":{"canvas":{"width":100,"height":70},"nodes":[{"id":"entrance","label":"Entrance","x":50,"y":66,"shape":"rect","fixed":true,"evidence":[{"i0":3,"i1":6,"quote":"..."}]},{"id":"n1","x":20,"y":30,"shape":"circle","blank_slot":1,"evidence":[{"i0":13,"i1":15,"quote":"..."}]}],"paths":[{"from":"entrance","to":"n1","label":"Main Path"}]}}
+
+若这些句子无法连贯还原成一个场景（位置关系互相矛盾或信息不足），不要硬凑——返回 {"refused": true, "reason": "一句话原因"}。"""
+
+_SCENE_USER_EN = """Below are the transcript's content sentences (each line's [start-end] is the sentence's word-index range; the number before each word is its global index, for evidence citation). Sentences carrying spatial description come first (cues such as in/on the left, next to, opposite, at the bottom, between take priority):
+{{sentences}}
+
+Reconstruct a directly drawable scene from the speaker's spatial description and return it as scene JSON:
+- kind: "map", "plan" or "diagram".
+- canvas: normalized canvas, e.g. {"width": 100, "height": 70}; every coordinate must stay inside it.
+- nodes: the scene's locations, ids unique. Nodes with fixed=true are printed on the map and must carry a label; blank nodes carry no label and use a blank_slot number (numbered continuously from 1, at least {{count}} of them), rendered as numbered circles. Any two nodes must keep a distance of at least 8 (normalized units); no overlaps.
+- Every node must carry evidence: the transcript word span supporting its position (i0/i1 word indices + a verbatim quote), preferring the spatial-description sentences.
+- paths: optional connections; from/to must be existing node ids.
+
+Return a JSON object only, no prose:
+{"kind":"map","scene":{"canvas":{"width":100,"height":70},"nodes":[{"id":"entrance","label":"Entrance","x":50,"y":66,"shape":"rect","fixed":true,"evidence":[{"i0":3,"i1":6,"quote":"..."}]},{"id":"n1","x":20,"y":30,"shape":"circle","blank_slot":1,"evidence":[{"i0":13,"i1":15,"quote":"..."}]}],"paths":[{"from":"entrance","to":"n1","label":"Main Path"}]}}
+
+If these sentences do not cohere into one scene (contradictory positions or not enough information), do not force it — return {"refused": true, "reason": "one-line reason"}."""
 
 #: type key -> (rules zh, rules en). Every text ends with its refusal
 #: paragraph (design §4.5); the parenthetical examples are adapted per
@@ -355,6 +399,22 @@ ALL_PROMPTS: tuple[PromptSpec, ...] = (
         variables=("part", "label", "count", "instruction", "rules", "gap",
                    "schema"),
         default=_TASK_FRAME_EN,
+    ),
+    PromptSpec(
+        key="scene.user.zh",
+        title_zh="场景还原（地图步骤 1）· 中文",
+        title_en="Scene reconstruction (map step 1) · Chinese",
+        category="scene",
+        variables=("sentences", "count"),
+        default=_SCENE_USER_ZH,
+    ),
+    PromptSpec(
+        key="scene.user.en",
+        title_zh="场景还原（地图步骤 1）· 英文",
+        title_en="Scene reconstruction (map step 1) · English",
+        category="scene",
+        variables=("sentences", "count"),
+        default=_SCENE_USER_EN,
     ),
 ) + _rule_specs()
 

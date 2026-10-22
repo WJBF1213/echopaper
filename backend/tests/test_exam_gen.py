@@ -717,24 +717,151 @@ def test_precheck_map_without_spatial_language_skips(tmp_db):
     assert [c["task"] for c in captured] == ["exam:completion"]
 
 
-def test_map_with_spatial_language_waits_for_scene_path(tmp_db):
-    """Spatial language present: the map block still cannot run until the
-    scene path lands (§4.3, later task) -- skipped by precheck, zero
-    LLM calls (the message changes when the two-step generation arrives)."""
+def make_scene(words) -> dict:
+    """A schema-conformant scene over MAP_TALK (design §4.3): four fixed
+    labels + five blank slots, every node evidenced, no overlaps."""
+    def node(nid, x, y, label="", slot=None, span=None):
+        i0, i1 = find_span(words, span)
+        return {
+            "id": nid, "label": label, "x": x, "y": y,
+            "shape": "circle" if slot else "rect",
+            **({"blank_slot": slot} if slot else {"fixed": True}),
+            "evidence": [{"i0": i0, "i1": i1, "quote": span}],
+        }
+
+    return {
+        "kind": "map",
+        "scene": {
+            "canvas": {"width": 100, "height": 70},
+            "nodes": [
+                node("entrance", 50, 66, label="Entrance", span="entrance"),
+                node("gift", 14, 56, label="Gift Shop", span="gift shop"),
+                node("ticket", 50, 50, label="Ticket Desk", span="ticket desk"),
+                node("cafe", 86, 56, label="Cafe", span="cafe"),
+                node("n1", 14, 40, slot=1, span="main hall"),
+                node("n2", 50, 34, slot=2, span="galleries"),
+                node("n3", 86, 40, slot=3, span="sculpture garden"),
+                node("n4", 30, 22, slot=4, span="north wing"),
+                node("n5", 70, 22, slot=5, span="lecture theatre"),
+            ],
+            "paths": [
+                {"from": "entrance", "to": "n1", "label": "Main Path"},
+            ],
+        },
+    }
+
+
+def test_map_block_two_step_generation(tmp_db):
+    """The map block is two LLM calls in order (design §4.3): a task=scene
+    reconstruction, then the exam:map_labelling matching call forced onto
+    the scene-derived option pool; the visual rides the paper group."""
     words, ranges = make_material(MAP_TALK * 4)  # 228 words, spatial-rich
+    entrance = find_span(words, "entrance")
+    gift = find_span(words, "gift shop")
+    ticket = find_span(words, "ticket desk")
+    cafe = find_span(words, "cafe")
+    hall = find_span(words, "main hall")
+    matching = {"groups": [{"title": "Visitor centre", "items": [
+        {"stem": "What is at blank slot 1?", "answer": "B",
+         "evidence": [{"i0": gift[0], "i1": gift[1], "quote": "gift shop"}]},
+        {"stem": "What is at blank slot 2?", "answer": "C",
+         "evidence": [{"i0": ticket[0], "i1": ticket[1], "quote": "ticket desk"}]},
+        {"stem": "What is at blank slot 3?", "answer": "D",
+         "evidence": [{"i0": cafe[0], "i1": cafe[1], "quote": "cafe"}]},
+        {"stem": "What is at blank slot 4?", "answer": "A",
+         "evidence": [{"i0": entrance[0], "i1": entrance[1], "quote": "entrance"}]},
+        {"stem": "What is at blank slot 5?", "answer": "E",
+         "evidence": [{"i0": hall[0], "i1": hall[1], "quote": "main hall"}]},
+    ]}]}
+    captured = []
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "map_labelling", "count": 5}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([make_scene(words), matching], capture=captured),
+    ))
+
+    # Step order and task labels: scene first, then the matching call.
+    assert [c["task"] for c in captured] == ["scene", "exam:map_labelling"]
+    assert [u["task"] for u in result.usage] == ["scene", "exam:map_labelling"]
+
+    # Step 2 runs against the forced scene-derived pool (fixed labels).
+    task_frame = captured[1]["messages"][2]["content"]
+    for label in ("Entrance", "Gift Shop", "Ticket Desk", "Cafe"):
+        assert label in task_frame
+
+    # The visual lands on the map group inside the paper dict.
+    group = result.paper["groups"][0]
+    assert group["type"] == "map_labelling"
+    assert group["visual"]["kind"] == "map"
+    scene_nodes = group["visual"]["scene"]["nodes"]
+    assert "entrance" in [n["id"] for n in scene_nodes]
+    slots = sorted(n["blank_slot"] for n in scene_nodes if "blank_slot" in n)
+    assert slots == [1, 2, 3, 4, 5]
+
+    # Options: fixed labels lettered A-F, then transcript distractors.
+    opts = group["options"]
+    assert opts[:4] == ["A. Entrance", "B. Gift Shop", "C. Ticket Desk", "D. Cafe"]
+    assert 4 <= len(opts) <= 6
+    assert group["partial"] is False
+    assert result.skipped == []
+
+    # Five keyed blanks with evidence on the spatial sentences.
+    assert len(group["items"]) == 5
+    assert {it["answer"] for it in group["items"]} == {"A", "B", "C", "D", "E"}
+    assert all(it["answer_text"] for it in group["items"])
+
+
+def test_map_scene_refusal_skips_block(tmp_db):
+    """A refused scene reconstruction skips the block with the model's
+    reason (not a precheck), and no exam:map_labelling call is spent."""
+    words, ranges = make_material(MAP_TALK * 4)
     captured = []
     with pytest.raises(exam_gen.ExamAllRefusedError) as excinfo:
         run(generate_paper(
             tmp_db, as_material(words, ranges),
             [{"type": "map_labelling", "count": 5}],
             {"api_key": "test"}, lang="zh",
-            chat_fn=fake_cached_chat([], capture=captured),
+            chat_fn=fake_cached_chat(
+                [{"refused": True, "reason": "位置关系互相矛盾"}], capture=captured,
+            ),
         ))
     skip = excinfo.value.skipped[0]
     assert skip["type"] == "map_labelling"
-    assert skip["reason"].startswith("[precheck]")
-    assert "场景" in skip["reason"]
-    assert captured == []
+    assert skip["reason"] == "位置关系互相矛盾"
+    assert not skip["reason"].startswith("[precheck]")
+    assert [c["task"] for c in captured] == ["scene"]
+
+
+def test_map_scene_validation_failure_skips_not_degrades(tmp_db):
+    """An invalid scene (overlapping nodes) skips the block -- the paper
+    keeps its other blocks but never degrades the map to a no-map
+    matching task (design §4.3: 还原失败才跳过)."""
+    words, ranges = make_material(MAP_TALK * 4)
+    left = find_span(words, "left")
+    completion = {"groups": [{"items": [
+        {"stem": "The gift shop is on the ______ opposite the ticket desk.",
+         "i0": left[0], "i1": left[1], "answer": "left",
+         "word_limit": "ONE WORD ONLY", "layout": "sentence"},
+    ]}]}
+    scene = make_scene(words)
+    scene["scene"]["nodes"][8]["x"] = 33  # n5 overlaps n4 (30, 22)
+    scene["scene"]["nodes"][8]["y"] = 25
+    captured = []
+    result = run(generate_paper(
+        tmp_db, as_material(words, ranges),
+        [{"type": "completion", "count": 1}, {"type": "map_labelling", "count": 5}],
+        {"api_key": "test"}, lang="zh",
+        chat_fn=fake_cached_chat([completion, scene], capture=captured),
+    ))
+    assert [c["task"] for c in captured] == ["exam:completion", "scene"]
+    assert [g["type"] for g in result.paper["groups"]] == ["completion"]
+    assert result.paper["total_items"] == 1
+    assert len(result.skipped) == 1
+    skip = result.skipped[0]
+    assert skip["type"] == "map_labelling"
+    assert not skip["reason"].startswith("[precheck]")
+    assert "校验" in skip["reason"]
 
 
 def test_shortfall_marks_group_partial_not_skipped(tmp_db):
