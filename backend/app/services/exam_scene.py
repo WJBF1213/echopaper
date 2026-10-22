@@ -26,6 +26,7 @@ a no-map matching task.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping
 
 from app.services import llm, pos, prompts
@@ -38,12 +39,28 @@ SCENE_KINDS = ("map", "plan", "diagram")
 #: printed labels and numbered blank circles from overlapping.
 MIN_NODE_DISTANCE = 8
 
+#: The emitted canvas is normalized so its larger side is exactly this
+#: (design §4.3: 归一化坐标 0-100). Geometry checks run AFTER rescaling,
+#: so the distance rule holds in render space whatever canvas size the
+#: model happened to return.
+CANVAS_NORM = 100
+
 #: The matching option-pool range (A-F) the step-2 pool must satisfy.
 _POOL_MIN, _POOL_MAX = 4, 6
 
 
 def _is_num(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _clean_num(value: float):
+    """Round a rescaled number for the emitted payload; keep ints ints."""
+    rounded = round(value, 2)
+    return int(rounded) if float(rounded).is_integer() else rounded
 
 
 async def _scene_call(chat, conn, cfg, messages, client=None):
@@ -73,17 +90,24 @@ def _validate_scene(
     and runs every hard check before the scene may hang on an
     ``ExamGroup``:
 
-      * coordinates inside the canvas; node ids unique and non-empty;
+      * coordinates inside the (declared) canvas; node ids unique and
+        non-empty;
+      * the canvas is normalized onto a 0-100 space (uniform scale, the
+        larger side becomes exactly ``CANVAS_NORM``) BEFORE any geometry
+        check, so a model returning a {1000, 700} canvas cannot sneak
+        nodes past the distance rule that would overlap on the render;
       * every node is exactly one of fixed (label required) / blank_slot;
       * blank nodes cover ``count`` with continuous numbering from 1;
-      * any two nodes keep >= ``MIN_NODE_DISTANCE`` normalized units apart;
+      * any two nodes keep >= ``MIN_NODE_DISTANCE`` normalized units
+        apart, measured on the rescaled coordinates;
       * every node carries evidence word indices valid against ``words``
         (the same evidence validation the item validators use);
       * path endpoints reference existing node ids.
 
     Returns ``(visual_dict, None)`` or ``(None, reason)``; the normalized
-    payload carries only known fields, so a hostile or drifting LLM
-    response cannot smuggle extra keys into the paper JSON.
+    payload carries only known fields on a 0-100 canvas, so a hostile or
+    drifting LLM response can neither smuggle extra keys into the paper
+    JSON nor break the render-space invariants.
     """
     from app.services import exam_gen  # deferred: exam_gen imports us
 
@@ -105,6 +129,14 @@ def _validate_scene(
     width, height = canvas.get("width"), canvas.get("height")
     if not _is_num(width) or not _is_num(height) or width <= 0 or height <= 0:
         return None, f"canvas 尺寸非法（{width!r}x{height!r}）"
+    # Rescale onto the 0-100 canvas before any geometry check: uniform
+    # scale by 100/max(width, height) preserves the layout's proportions,
+    # never wastes a proportionally-correct scene (a {200,140} scene is
+    # the same scene as {100,70}), and puts every emitted coordinate in
+    # [0, 100] with the larger canvas side at exactly 100.
+    scale = CANVAS_NORM / max(width, height)
+    norm_width = _clean_num(width * scale)
+    norm_height = _clean_num(height * scale)
 
     nodes_raw = body.get("nodes")
     if not isinstance(nodes_raw, list) or not nodes_raw:
@@ -142,7 +174,12 @@ def _validate_scene(
             not isinstance(slot, int) or isinstance(slot, bool) or slot < 1
         ):
             return None, f"节点 {nid} blank_slot 非法：{slot!r}"
-        node: dict = {"id": nid, "x": x, "y": y, "shape": shape}
+        node: dict = {
+            "id": nid,
+            "x": _clean_num(x * scale),
+            "y": _clean_num(y * scale),
+            "shape": shape,
+        }
         if fixed:
             label = str(raw.get("label") or "").strip()
             if not label:
@@ -191,7 +228,7 @@ def _validate_scene(
     visual = {
         "kind": kind,
         "scene": {
-            "canvas": {"width": width, "height": height},
+            "canvas": {"width": norm_width, "height": norm_height},
             "nodes": nodes,
             "paths": paths,
         },

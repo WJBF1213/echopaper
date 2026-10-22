@@ -153,6 +153,61 @@ def test_overlapping_nodes_rejected():
     assert "距离" in err or "重叠" in err
 
 
+def test_oversized_canvas_render_overlap_rejected():
+    """A {1000,700} canvas with nodes 10 raw units apart passes the naive
+    check, but on the normalized 0-100 render they are 1 unit apart: the
+    rescale must happen BEFORE the distance check, so the scene is
+    rejected (review fix: canvas normalization unenforced)."""
+    words, _ = make_material(MAP_TALK)
+    scene = valid_scene(words)
+    scene["scene"]["canvas"] = {"width": 1000, "height": 700}
+    for node in scene["scene"]["nodes"]:
+        node["x"] = node["x"] * 10
+        node["y"] = node["y"] * 10
+    # Proportionally fine, except n2 pulled to 10 raw units from n1
+    # (10 >= 8 in raw units; 1 after the 0-100 rescale).
+    scene["scene"]["nodes"][2]["x"] = 800
+    scene["scene"]["nodes"][3]["x"] = 810
+    scene["scene"]["nodes"][3]["y"] = 300
+    visual, err = _validate_scene(scene, 2, words)
+    assert visual is None
+    assert "距离" in err or "重叠" in err
+
+
+def test_proportional_scene_rescales_to_100_canvas():
+    """A scene laid out proportionally on a {200,140} canvas is the same
+    scene as {100,70}: it rescales to pass, and the emitted payload
+    carries the 0-100 canvas with rescaled coordinates."""
+    words, ranges = make_material(MAP_TALK)
+    scene = valid_scene(words)
+    scene["scene"]["canvas"] = {"width": 200, "height": 140}
+    for node in scene["scene"]["nodes"]:
+        node["x"] = node["x"] * 2
+        node["y"] = node["y"] * 2
+    visual, err = _validate_scene(scene, 2, words, ranges)
+    assert err is None
+    assert visual["scene"]["canvas"] == {"width": 100, "height": 70}
+    by_id = {n["id"]: n for n in visual["scene"]["nodes"]}
+    assert by_id["entrance"]["x"] == 50
+    assert by_id["entrance"]["y"] == 66
+    assert by_id["n1"]["x"] == 80
+    assert by_id["n1"]["y"] == 30
+
+    # Portrait canvases normalize with the larger side at exactly 100.
+    portrait = valid_scene(words)
+    portrait["scene"]["canvas"] = {"width": 800, "height": 1000}
+    for node in portrait["scene"]["nodes"]:
+        node["x"] = node["x"] * 10
+        node["y"] = node["y"] * 10
+    visual, err = _validate_scene(portrait, 2, words, ranges)
+    assert err is None
+    assert visual["scene"]["canvas"] == {"width": 80, "height": 100}
+    # Every emitted coordinate stays inside the 0-100 space.
+    for node in visual["scene"]["nodes"]:
+        assert 0 <= node["x"] <= 100
+        assert 0 <= node["y"] <= 100
+
+
 def test_blank_slot_numbering_gap_rejected():
     words, _ = make_material(MAP_TALK)
     scene = valid_scene(words)
