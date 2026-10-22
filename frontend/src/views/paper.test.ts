@@ -460,6 +460,24 @@ describe('PaperView results', () => {
     expect(wrapper.find('.layout-flowchart .flow-box').exists()).toBe(true)
     // One answer input per printed blank across all layouts.
     expect(wrapper.findAll('input.blank-input')).toHaveLength(6)
+
+    // Answer keys render for EVERY layout after 显示答案 (notes/sentence/
+    // flowchart included), once per item, with no duplicate inline keys.
+    const reveal = wrapper.findAll('button').find((b) => b.text().includes('显示答案'))
+    expect(reveal).toBeTruthy()
+    await reveal!.trigger('click')
+    const keys = wrapper.findAll('.layout-keys .answer-key')
+    expect(keys.map((n) => n.text())).toEqual([
+      '1. 答案：Anna',
+      '2. 答案：20',
+      '3. 答案：gate',
+      '4. 答案：fifty',
+      '5. 答案：1998',
+      '6. 答案：arrival',
+    ])
+    expect(keys.every((n) => n.isVisible())).toBe(true)
+    // The form presenter's old inline key is gone: each answer appears once.
+    expect(wrapper.text().split('答案：Anna').length - 1).toBe(1)
     wrapper.unmount()
   })
 

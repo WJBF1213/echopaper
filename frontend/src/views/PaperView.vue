@@ -702,12 +702,6 @@ onMounted(load)
                       </button>
                       <span v-if="item.word_limit" class="hint">{{ item.word_limit }}</span>
                     </div>
-                    <p
-                      v-if="showAnswers || states[item.number] === 'bad'"
-                      class="answer-key"
-                    >
-                      {{ t('paper.answer', { answer: answerLabel(item) }) }}
-                    </p>
                   </div>
                 </div>
               </div>
@@ -909,11 +903,8 @@ onMounted(load)
                 </div>
               </div>
 
-              <!-- per-item answer keys for the compact layouts -->
-              <div
-                v-if="section.layout === 'summary' || section.layout === 'table'"
-                class="summary-keys"
-              >
+              <!-- per-item answer keys for every completion layout -->
+              <div class="layout-keys">
                 <p
                   v-for="item in section.items"
                   v-show="showAnswers || states[item.number] === 'bad'"
@@ -1393,7 +1384,7 @@ onMounted(load)
   color: var(--accent);
 }
 
-.summary-keys {
+.layout-keys {
   margin-top: 6px;
 }
 
