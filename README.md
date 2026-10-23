@@ -413,10 +413,6 @@ LICENSE                 MIT
 - [`docs/reference/ielts-listening-rules.md`](docs/reference/ielts-listening-rules.md) —
   official IELTS part/type reference (backup reference; not yet wired into the
   LLM prompts)
-- [`docs/EXPERIMENT_FULL_EXAM.md`](docs/EXPERIMENT_FULL_EXAM.md) — the design
-  experiment that led to the v0.1.0 paper-only redesign (historical record)
-- `docs/superpowers/` — design specs, implementation plans, and experiment logs
-  from the development process (historical records)
 
 ## Roadmap
 

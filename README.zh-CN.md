@@ -358,9 +358,6 @@ LICENSE                 MIT
 - [`docs/ADDING_A_LANGUAGE.md`](docs/ADDING_A_LANGUAGE.md) —— 本地化分步指南
 - [`docs/reference/ielts-listening-rules.md`](docs/reference/ielts-listening-rules.md) ——
   官方雅思 Part/题型参考（备用参考，暂未接入 LLM）
-- [`docs/EXPERIMENT_FULL_EXAM.md`](docs/EXPERIMENT_FULL_EXAM.md) —— 引出 v0.1.0
-  纯整卷重构的设计实验（历史记录）
-- `docs/superpowers/` —— 开发过程中的设计规格、实施计划与实验日志（历史记录）
 
 ## 路线图
 
