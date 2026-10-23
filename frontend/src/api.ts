@@ -94,14 +94,17 @@ export interface LlmSettings {
   key_masked: string | null
 }
 
+/** GET /api/settings → asr (Task 3 shape). ``engine`` is derived
+ * server-side: ``cloud`` in cloud mode, else the platform's one local
+ * engine; the raw cloud key is never returned (mask fields instead). */
 export interface AsrSettings {
+  mode: 'local' | 'cloud'
   engine: string
-  parakeet_model: string
-  whisper_model: string
-  faster_whisper_model: string
   idle_unload_min: number
-  available_engines: string[]
-  default_engine: string
+  cloud_base_url: string
+  cloud_model: string
+  has_cloud_key: boolean
+  cloud_key_masked: string | null
 }
 
 /** One prompt-registry entry from GET /api/prompts (title follows locale). */
@@ -124,7 +127,11 @@ export interface SettingsPatch {
   llm?: Partial<Pick<LlmSettings, 'provider' | 'base_url' | 'model' | 'max_context_tokens'>> & {
     api_key?: string
   }
-  asr?: Partial<AsrSettings>
+  /** ``cloud_api_key: ""`` keeps the stored key (backend treats blank as
+   * "no change"); send the raw key only when the user typed a new one. */
+  asr?: Partial<Pick<AsrSettings, 'mode' | 'idle_unload_min' | 'cloud_base_url' | 'cloud_model'>> & {
+    cloud_api_key?: string
+  }
 }
 
 /** One row of GET /api/materials (design §六): paper-based counts. */
@@ -496,6 +503,15 @@ export const api = {
     request<{ ok: boolean; message: string }>(
       '/settings/test-llm',
       jsonInit('POST', llm ?? {}),
+    ),
+  /** Probe the cloud ASR engine with unsaved form values; a blank
+   * ``cloud_api_key`` means "use the stored key" (Task 3 contract). */
+  testCloudAsr: (
+    asr?: Partial<Pick<AsrSettings, 'cloud_base_url' | 'cloud_model'>> & { cloud_api_key?: string },
+  ) =>
+    request<{ ok: boolean; message: string }>(
+      '/asr/test-cloud',
+      jsonInit('POST', asr ?? {}),
     ),
 
   listPrompts: () => request<PromptEntry[]>('/prompts'),

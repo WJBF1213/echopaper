@@ -33,6 +33,15 @@ const chipClass = computed(() => {
   }
 })
 
+/** `cloud · <cloud_model>` in cloud mode (the model is a provider-facing
+ * name, shown verbatim); local engines trim the HF repo prefix. */
+const engineText = computed(() => {
+  const s = status.value
+  if (!s) return ''
+  if (s.engine === 'cloud') return `cloud · ${s.model}`
+  return `${s.engine} · ${s.model.split('/').pop()}`
+})
+
 async function refresh() {
   try {
     status.value = await api.asrStatus()
@@ -82,7 +91,7 @@ onBeforeUnmount(() => {
         <Icon name="mic" :size="12" />
         {{ t('asr.model', { state: label }) }}
       </span>
-      <span v-if="status" class="engine">{{ status.engine }} · {{ status.model.split('/').pop() }}</span>
+      <span v-if="status" class="engine">{{ engineText }}</span>
     </div>
     <div class="asr-row">
       <button class="ghost small" type="button" :disabled="busy || status?.state === 'ready'" @click="load">

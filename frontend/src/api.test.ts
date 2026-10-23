@@ -123,6 +123,30 @@ describe('api client', () => {
     })
   })
 
+  it('posts the cloud ASR test contract to /asr/test-cloud', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: () => Promise.resolve({ ok: true, message: '云端连接正常' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const res = await api.testCloudAsr({
+      cloud_base_url: 'https://api.groq.com/openai/v1',
+      cloud_model: 'whisper-large-v3-turbo',
+      cloud_api_key: '',
+    })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/asr/test-cloud')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body)).toEqual({
+      cloud_base_url: 'https://api.groq.com/openai/v1',
+      cloud_model: 'whisper-large-v3-turbo',
+      cloud_api_key: '',
+    })
+    expect(res).toEqual({ ok: true, message: '云端连接正常' })
+  })
+
   it('carries the structured skipped body of an all-refused 400', async () => {
     const skipped = [{ type: 'map_labelling', reason: '转写无空间方位描述' }]
     mockFetch({

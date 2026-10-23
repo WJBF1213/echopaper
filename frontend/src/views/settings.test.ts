@@ -15,6 +15,7 @@ vi.mock('../api', async () => {
       asrLoad: vi.fn(),
       asrUnload: vi.fn(),
       testLlm: vi.fn(),
+      testCloudAsr: vi.fn(),
       listPrompts: vi.fn(),
       putPrompt: vi.fn(),
       clearLlmCache: vi.fn(),
@@ -35,13 +36,25 @@ const settings = {
     key_masked: 'abcd****wxyz',
   },
   asr: {
+    mode: 'local' as const,
     engine: 'parakeet',
-    parakeet_model: 'mlx-community/parakeet-tdt-0.6b-v3',
-    whisper_model: 'mlx-community/whisper-large-v3-turbo',
-    faster_whisper_model: 'large-v3-turbo',
     idle_unload_min: 10,
-    available_engines: ['parakeet', 'whisper', 'faster_whisper'],
-    default_engine: 'parakeet',
+    cloud_base_url: 'https://api.groq.com/openai/v1',
+    cloud_model: 'whisper-large-v3-turbo',
+    has_cloud_key: false,
+    cloud_key_masked: null,
+  },
+}
+
+/** Stored cloud configuration (GET shape once mode=cloud was saved). */
+const cloudSettings = {
+  ...settings,
+  asr: {
+    ...settings.asr,
+    mode: 'cloud' as const,
+    engine: 'cloud',
+    has_cloud_key: true,
+    cloud_key_masked: 'abcd****wxyz',
   },
 }
 
@@ -98,10 +111,7 @@ describe('SettingsView', () => {
   beforeEach(() => {
     mocked.getSettings.mockResolvedValue(settings)
     mocked.asrStatus.mockResolvedValue(status)
-    mocked.updateSettings.mockResolvedValue({
-      ...settings,
-      asr: { ...settings.asr, engine: 'whisper' },
-    })
+    mocked.updateSettings.mockResolvedValue(settings)
     // Fresh copies per mount: the view replaces entries in the array it is
     // handed, and reusing the fixture objects would leak edits across tests.
     mocked.listPrompts.mockImplementation(async () =>
@@ -135,13 +145,110 @@ describe('SettingsView', () => {
     wrapper.unmount()
   })
 
-  it('switches engine through PUT /settings and shows the new status', async () => {
+  it('renders the Local/Cloud mode selector with fixed local engine info only', async () => {
     const wrapper = await mountView()
-    const engineSelect = wrapper
+
+    // Mode radio group: local checked, cloud present.
+    const radios = wrapper.findAll('input[type="radio"]')
+    expect(radios).toHaveLength(2)
+    expect((wrapper.find('input[type="radio"][value="local"]').element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.find('input[type="radio"][value="cloud"]').exists()).toBe(true)
+
+    // Local mode: read-only engine label + fixed-model hint + idle input.
+    expect(wrapper.text()).toContain('parakeet-mlx')
+    expect(wrapper.text()).toContain('本地模型已按平台固定')
+    expect(
+      wrapper
+        .findAll('input[type="number"]')
+        .find((i) => (i.element as HTMLInputElement).value === '10'),
+    ).toBeTruthy()
+
+    // No cloud fields while local: no preset select, no privacy notice,
+    // no input holding the cloud base URL.
+    const presetSelect = wrapper
       .findAll('select')
-      .find((s) => s.findAll('option').some((o) => o.text().includes('mlx-whisper')))
-    expect(engineSelect).toBeTruthy()
-    await engineSelect!.setValue('whisper')
+      .find((s) => s.findAll('option').some((o) => o.text().includes('Groq')))
+    expect(presetSelect).toBeUndefined()
+    expect(wrapper.text()).not.toContain('云端模式下音频将上传')
+    const cloudUrlInput = wrapper
+      .findAll('input[type="text"]')
+      .find((i) => (i.element as HTMLInputElement).value === 'https://api.groq.com/openai/v1')
+    expect(cloudUrlInput).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('cloud mode shows base URL / model / key inputs, preset select, test button and privacy notice', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('input[type="radio"][value="cloud"]').setValue(true)
+
+    const presetSelect = wrapper
+      .findAll('select')
+      .find((s) => s.findAll('option').some((o) => o.text().includes('Groq')))
+    expect(presetSelect).toBeTruthy()
+
+    const urlInput = wrapper
+      .findAll('input[type="text"]')
+      .find((i) => (i.element as HTMLInputElement).value === 'https://api.groq.com/openai/v1')
+    expect(urlInput).toBeTruthy()
+    const modelInput = wrapper
+      .findAll('input[type="text"]')
+      .find((i) => (i.element as HTMLInputElement).value === 'whisper-large-v3-turbo')
+    expect(modelInput).toBeTruthy()
+
+    // Second password input = the cloud key field (first is the LLM key).
+    expect(wrapper.findAll('input[type="password"]')).toHaveLength(2)
+
+    const testBtn = wrapper.findAll('button').find((b) => b.text().includes('测试连接'))
+    expect(testBtn).toBeTruthy()
+
+    expect(wrapper.text()).toContain('云端模式下音频将上传')
+    wrapper.unmount()
+  })
+
+  it('applies cloud presets into the base URL and model fields', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('input[type="radio"][value="cloud"]').setValue(true)
+
+    const presetSelect = wrapper
+      .findAll('select')
+      .find((s) => s.findAll('option').some((o) => o.text().includes('Groq')))!
+    await presetSelect.setValue('openai')
+    let urlInput = wrapper
+      .findAll('input[type="text"]')
+      .find((i) => (i.element as HTMLInputElement).value === 'https://api.openai.com/v1')!
+    expect(urlInput).toBeTruthy()
+    expect(
+      wrapper
+        .findAll('input[type="text"]')
+        .find((i) => (i.element as HTMLInputElement).value === 'whisper-1'),
+    ).toBeTruthy()
+
+    await presetSelect.setValue('groq')
+    urlInput = wrapper
+      .findAll('input[type="text"]')
+      .find((i) => (i.element as HTMLInputElement).value === 'https://api.groq.com/openai/v1')!
+    expect(urlInput).toBeTruthy()
+    expect(
+      wrapper
+        .findAll('input[type="text"]')
+        .find((i) => (i.element as HTMLInputElement).value === 'whisper-large-v3-turbo'),
+    ).toBeTruthy()
+
+    // Custom leaves the fields as-is (keeps the Groq values above).
+    await presetSelect.setValue('custom')
+    expect(
+      wrapper
+        .findAll('input[type="text"]')
+        .find((i) => (i.element as HTMLInputElement).value === 'https://api.groq.com/openai/v1'),
+    ).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('saves a mode switch through PUT with the cloud fields; blank key sends "" (keep)', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('input[type="radio"][value="cloud"]').setValue(true)
+    const cloudKeyInput = wrapper.findAll('input[type="password"]')[1]
+    await cloudKeyInput.setValue('sk-cloud-new')
 
     const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('保存设置'))
     await saveBtn!.trigger('click')
@@ -149,10 +256,87 @@ describe('SettingsView', () => {
 
     expect(mocked.updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({
-        asr: expect.objectContaining({ engine: 'whisper' }),
+        asr: {
+          mode: 'cloud',
+          idle_unload_min: 10,
+          cloud_base_url: 'https://api.groq.com/openai/v1',
+          cloud_model: 'whisper-large-v3-turbo',
+          cloud_api_key: 'sk-cloud-new',
+        },
       }),
     )
     expect(mocked.asrStatus).toHaveBeenCalled()
+    // Typed key is cleared after it is stored.
+    expect((cloudKeyInput.element as HTMLInputElement).value).toBe('')
+
+    // An empty key field sends "" which the backend reads as "keep stored".
+    await saveBtn!.trigger('click')
+    await flushPromises()
+    const secondCall = mocked.updateSettings.mock.calls[1][0]
+    expect(secondCall.asr).toMatchObject({ mode: 'cloud', cloud_api_key: '' })
+    wrapper.unmount()
+  })
+
+  it('masks the stored cloud key in the key field placeholder', async () => {
+    mocked.getSettings.mockResolvedValue(cloudSettings)
+    const wrapper = await mountView()
+
+    expect((wrapper.find('input[type="radio"][value="cloud"]').element as HTMLInputElement).checked).toBe(true)
+    const cloudKeyInput = wrapper.findAll('input[type="password"]')[1]
+    expect(cloudKeyInput.attributes('placeholder')).toContain('abcd****wxyz')
+    wrapper.unmount()
+  })
+
+  it('tests the cloud engine with unsaved form values and shows the message verbatim', async () => {
+    mocked.testCloudAsr.mockResolvedValue({ ok: true, message: '云端连接正常，可用模型 2 个' })
+    const wrapper = await mountView()
+    await wrapper.find('input[type="radio"][value="cloud"]').setValue(true)
+    const cloudKeyInput = wrapper.findAll('input[type="password"]')[1]
+    await cloudKeyInput.setValue('sk-typed-in-form')
+
+    const testBtn = wrapper.findAll('button').find((b) => b.text().includes('测试连接'))
+    await testBtn!.trigger('click')
+    await flushPromises()
+
+    expect(mocked.testCloudAsr).toHaveBeenCalledWith({
+      cloud_base_url: 'https://api.groq.com/openai/v1',
+      cloud_model: 'whisper-large-v3-turbo',
+      cloud_api_key: 'sk-typed-in-form',
+    })
+    expect(wrapper.text()).toContain('云端连接正常，可用模型 2 个')
+    wrapper.unmount()
+  })
+
+  it('shows the cloud test failure message verbatim too', async () => {
+    mocked.testCloudAsr.mockResolvedValue({ ok: false, message: '密钥无效（401）' })
+    const wrapper = await mountView()
+    await wrapper.find('input[type="radio"][value="cloud"]').setValue(true)
+
+    const testBtn = wrapper.findAll('button').find((b) => b.text().includes('测试连接'))
+    await testBtn!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('密钥无效（401）')
+    const { toast } = await import('../router')
+    expect(toast.value?.kind).toBe('error')
+    expect(toast.value?.text).toContain('密钥无效（401）')
+    wrapper.unmount()
+  })
+
+  it('toasts a failed save (e.g. busy engine 409 on mode switch) without losing the form', async () => {
+    mocked.updateSettings.mockRejectedValue(new Error('引擎忙，稍后再试'))
+    const wrapper = await mountView()
+    await wrapper.find('input[type="radio"][value="cloud"]').setValue(true)
+
+    const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('保存设置'))
+    await saveBtn!.trigger('click')
+    await flushPromises()
+
+    const { toast } = await import('../router')
+    expect(toast.value?.kind).toBe('error')
+    expect(toast.value?.text).toContain('引擎忙，稍后再试')
+    // The chosen mode stays in the form so the user can retry.
+    expect((wrapper.find('input[type="radio"][value="cloud"]').element as HTMLInputElement).checked).toBe(true)
     wrapper.unmount()
   })
 

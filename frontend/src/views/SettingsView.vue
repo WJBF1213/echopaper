@@ -96,20 +96,22 @@ const form = reactive({
   baseUrl: '',
   model: '',
   maxContextTokens: 262144,
-  engine: 'parakeet',
-  parakeetModel: '',
-  whisperModel: '',
-  fasterWhisperModel: '',
+  mode: 'local' as 'local' | 'cloud',
   idleUnloadMin: 10,
-  availableEngines: ['faster_whisper'] as string[],
+  cloudPreset: 'custom',
+  cloudBaseUrl: '',
+  cloudModel: '',
 })
+/** Cloud API key input — write-only, cleared once stored (like apiKey). */
+const cloudApiKey = ref('')
+const cloudTesting = ref(false)
+const cloudTestMessage = ref('')
 
+/** Human label for the platform's fixed local engine (GET asr.engine). */
 function engineLabel(name: string): string {
   switch (name) {
     case 'parakeet':
       return t('settings.engine.parakeet')
-    case 'whisper':
-      return t('settings.engine.whisper')
     case 'faster_whisper':
       return t('settings.engine.fasterWhisper')
     default:
@@ -144,6 +146,38 @@ function onProviderChange() {
   }
 }
 
+/** Cloud ASR presets (Task 4): frontend-only, like the LLM PRESETS. */
+const ASR_PRESETS: Record<string, { baseUrl: string; model: string; labelKey: string }> = {
+  groq: {
+    baseUrl: 'https://api.groq.com/openai/v1',
+    model: 'whisper-large-v3-turbo',
+    labelKey: 'settings.asr.preset.groq',
+  },
+  openai: {
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'whisper-1',
+    labelKey: 'settings.asr.preset.openai',
+  },
+  custom: { baseUrl: '', model: '', labelKey: 'settings.asr.preset.custom' },
+}
+
+/** Pick the select entry matching a stored base URL (custom otherwise). */
+function detectAsrPreset(baseUrl: string): string {
+  const url = baseUrl.trim()
+  for (const [key, preset] of Object.entries(ASR_PRESETS)) {
+    if (key !== 'custom' && preset.baseUrl === url) return key
+  }
+  return 'custom'
+}
+
+function onAsrPresetChange() {
+  const preset = ASR_PRESETS[form.cloudPreset]
+  if (preset && form.cloudPreset !== 'custom') {
+    form.cloudBaseUrl = preset.baseUrl
+    form.cloudModel = preset.model
+  }
+}
+
 async function load() {
   loading.value = true
   // The footer version is decorative: never let a health hiccup break the page.
@@ -167,15 +201,11 @@ async function load() {
     form.baseUrl = s.llm.base_url
     form.model = s.llm.model
     form.maxContextTokens = s.llm.max_context_tokens
-    form.engine = s.asr.engine
-    form.parakeetModel = s.asr.parakeet_model
-    form.whisperModel = s.asr.whisper_model
-    form.fasterWhisperModel = s.asr.faster_whisper_model
+    form.mode = s.asr.mode === 'cloud' ? 'cloud' : 'local'
     form.idleUnloadMin = s.asr.idle_unload_min
-    form.availableEngines = s.asr.available_engines ?? ['faster_whisper']
-    if (!form.availableEngines.includes(form.engine)) {
-      form.engine = s.asr.default_engine ?? form.availableEngines[0]
-    }
+    form.cloudBaseUrl = s.asr.cloud_base_url
+    form.cloudModel = s.asr.cloud_model
+    form.cloudPreset = detectAsrPreset(s.asr.cloud_base_url)
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
   } finally {
@@ -201,21 +231,45 @@ async function save() {
     const updated = await api.updateSettings({
       llm: llmPatch(),
       asr: {
-        engine: form.engine,
-        parakeet_model: form.parakeetModel,
-        whisper_model: form.whisperModel,
-        faster_whisper_model: form.fasterWhisperModel,
+        mode: form.mode,
         idle_unload_min: form.idleUnloadMin,
+        cloud_base_url: form.cloudBaseUrl,
+        cloud_model: form.cloudModel,
+        // Empty string = keep the stored key (backend contract, Task 3).
+        cloud_api_key: cloudApiKey.value.trim(),
       },
     })
     settings.value = updated
     apiKey.value = ''
+    cloudApiKey.value = ''
     asrStatus.value = await api.asrStatus()
     showToast(t('settings.llm.savedToast'))
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error')
   } finally {
     saving.value = false
+  }
+}
+
+/** Probe the cloud engine with the unsaved form values; the endpoint
+ * accepts overrides, so a blank key field means "use the stored key". */
+async function testCloudAsr() {
+  cloudTesting.value = true
+  cloudTestMessage.value = ''
+  try {
+    const res = await api.testCloudAsr({
+      cloud_base_url: form.cloudBaseUrl,
+      cloud_model: form.cloudModel,
+      cloud_api_key: cloudApiKey.value.trim(),
+    })
+    // The message is localized server-side; show it verbatim either way.
+    cloudTestMessage.value = res.message
+    showToast(res.message, res.ok ? 'info' : 'error')
+  } catch (err) {
+    cloudTestMessage.value = err instanceof Error ? err.message : String(err)
+    showToast(cloudTestMessage.value, 'error')
+  } finally {
+    cloudTesting.value = false
   }
 }
 
@@ -324,31 +378,62 @@ onMounted(load)
       <section class="card">
         <h2>{{ t('settings.asr.title') }}</h2>
         <div class="grid">
-          <label class="field">
-            <span class="tag">{{ t('settings.asr.engine') }}</span>
-            <select v-model="form.engine">
-              <option v-for="name in form.availableEngines" :key="name" :value="name">
-                {{ engineLabel(name) }}
-              </option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="tag">{{ t('settings.asr.parakeetModel') }}</span>
-            <input v-model="form.parakeetModel" type="text" />
-          </label>
-          <label class="field">
-            <span class="tag">{{ t('settings.asr.whisperModel') }}</span>
-            <input v-model="form.whisperModel" type="text" />
-          </label>
-          <label class="field">
-            <span class="tag">{{ t('settings.asr.fasterWhisperModel') }}</span>
-            <input v-model="form.fasterWhisperModel" type="text" />
-          </label>
-          <label class="field">
-            <span class="tag">{{ t('settings.asr.idle') }}</span>
-            <input v-model.number="form.idleUnloadMin" type="number" min="0" max="240" />
-          </label>
+          <div class="field mode-field" role="radiogroup" :aria-label="t('settings.asr.mode')">
+            <span class="tag">{{ t('settings.asr.mode') }}</span>
+            <div class="mode-options">
+              <label class="radio">
+                <input v-model="form.mode" type="radio" value="local" />
+                {{ t('settings.asr.mode.local') }}
+              </label>
+              <label class="radio">
+                <input v-model="form.mode" type="radio" value="cloud" />
+                {{ t('settings.asr.mode.cloud') }}
+              </label>
+            </div>
+          </div>
+          <template v-if="form.mode === 'local'">
+            <div class="field mode-field">
+              <span class="tag">{{ t('settings.asr.engine') }}</span>
+              <span class="static-value">{{ engineLabel(settings?.asr.engine ?? '') }}</span>
+            </div>
+            <label class="field">
+              <span class="tag">{{ t('settings.asr.idle') }}</span>
+              <input v-model.number="form.idleUnloadMin" type="number" min="0" max="240" />
+            </label>
+          </template>
+          <template v-else>
+            <label class="field">
+              <span class="tag">{{ t('settings.asr.preset') }}</span>
+              <select v-model="form.cloudPreset" @change="onAsrPresetChange">
+                <option v-for="(preset, key) in ASR_PRESETS" :key="key" :value="key">
+                  {{ t(preset.labelKey) }}
+                </option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="tag">{{ t('settings.asr.baseUrl') }}</span>
+              <input v-model="form.cloudBaseUrl" type="text" placeholder="https://…" />
+            </label>
+            <label class="field">
+              <span class="tag">{{ t('settings.asr.model') }}</span>
+              <input v-model="form.cloudModel" type="text" placeholder="whisper-large-v3-turbo" />
+            </label>
+            <label class="field">
+              <span class="tag">{{ t('settings.asr.apiKey') }}</span>
+              <input
+                v-model="cloudApiKey"
+                type="password"
+                :placeholder="settings?.asr.has_cloud_key
+                ? t('settings.asr.apiKey.saved', { masked: settings.asr.cloud_key_masked ?? '' })
+                : t('settings.asr.apiKey.empty')"
+              />
+            </label>
+          </template>
         </div>
+        <p v-if="form.mode === 'cloud'" class="hint privacy-note">
+          {{ t('settings.asr.privacyNote') }}
+        </p>
+        <p v-else class="hint">{{ t('settings.asr.localEngineHint') }}</p>
         <div class="row" style="margin-top: 14px">
           <span
             v-if="asrStatus"
@@ -359,7 +444,20 @@ onMounted(load)
           </span>
           <button class="ghost small" type="button" @click="engineAction('load')">{{ t('settings.asr.load') }}</button>
           <button class="ghost small" type="button" @click="engineAction('unload')">{{ t('settings.asr.unload') }}</button>
-          <span class="hint">{{ t('settings.asr.hint') }}</span>
+          <button
+            v-if="form.mode === 'cloud'"
+            class="ghost small"
+            type="button"
+            :disabled="cloudTesting"
+            @click="testCloudAsr"
+          >
+            <Icon name="spark" :size="13" />
+            {{ cloudTesting ? t('settings.asr.testing') : t('settings.asr.test') }}
+          </button>
+          <span v-if="form.mode === 'cloud' && cloudTestMessage" class="hint">
+            {{ cloudTestMessage }}
+          </span>
+          <span v-else class="hint">{{ t('settings.asr.hint') }}</span>
         </div>
       </section>
 
@@ -437,6 +535,49 @@ onMounted(load)
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
+}
+
+/* label.field is the global pattern; the radio group and the read-only
+ * engine display are divs, so mirror that layout here. */
+.mode-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.mode-options {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-height: 34px;
+  flex-wrap: wrap;
+}
+
+.mode-options .radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.mode-options .radio input[type='radio'] {
+  accent-color: var(--accent);
+}
+
+.static-value {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.privacy-note {
+  margin-top: 10px;
 }
 
 .prompt-group {
