@@ -79,6 +79,7 @@ const zh: Record<string, string> = {
   'form.transcript.placeholderAsr':
     '粘贴官方原文可提高转写准确度；只提供原文时不包含音频。',
   'form.audioFile': '音频文件',
+  'form.changeFile': '更换音频',
   'form.audioUrl': '或音频链接',
   'form.audioUrl.placeholder': 'https://…/audio.mp3',
   'form.submit': '创建并转写',

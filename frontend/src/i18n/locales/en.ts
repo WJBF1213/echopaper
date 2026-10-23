@@ -82,6 +82,7 @@ const en: Record<string, string> = {
   'form.transcript.placeholderAsr':
     'Pasting the official transcript improves transcription accuracy; a transcript alone has no audio.',
   'form.audioFile': 'Audio file',
+  'form.changeFile': 'Change audio',
   'form.audioUrl': 'or audio URL',
   'form.audioUrl.placeholder': 'https://…/audio.mp3',
   'form.submit': 'Create & transcribe',

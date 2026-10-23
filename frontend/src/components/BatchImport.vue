@@ -98,8 +98,12 @@ async function submit() {
           type="file"
           accept="audio/*,.mp3,.m4a,.wav,.flac,.ogg,.opus,.aac,.webm"
           multiple
+          hidden
           @change="onFiles"
         />
+        <button class="ghost pick" type="button" @click="inputEl?.click()">
+          {{ t('batch.choose') }}
+        </button>
       </label>
     </div>
 

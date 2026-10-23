@@ -13,6 +13,7 @@ const form = reactive({
   audioUrl: '',
 })
 const file = ref<File | null>(null)
+const fileInput = ref<HTMLInputElement | null>(null)
 const submitting = ref(false)
 const advanced = ref(false)
 
@@ -74,7 +75,13 @@ async function submit() {
     <div class="grid" style="margin-top: 14px">
       <label class="field">
         <span class="tag">{{ t('form.audioFile') }}</span>
-        <input type="file" accept="audio/*" @change="onFile" />
+        <input ref="fileInput" type="file" accept="audio/*" hidden @change="onFile" />
+        <span class="pickrow">
+          <button class="ghost pick" type="button" @click="fileInput?.click()">
+            {{ file ? t('form.changeFile') : t('form.audioFile') }}
+          </button>
+          <span v-if="file" class="fname">{{ file.name }}</span>
+        </span>
       </label>
       <label class="field">
         <span class="tag">{{ t('form.audioUrl') }}</span>
@@ -124,6 +131,19 @@ async function submit() {
   align-items: center;
   gap: 10px;
   margin-top: 16px;
+}
+.pickrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.fname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+  font-size: 12.5px;
 }
 .advanced {
   margin: 16px 0 0;
