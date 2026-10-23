@@ -193,9 +193,17 @@ class JobManager:
         # -- stage 2: words (ASR / align / manual) ---------------------------
         engine_obj = None
         if audio_path is not None:
-            self._update(job_id, state="transcribing", percent=30,
-                         message=i18n.t("job.transcribing"))
+            # Acquire BEFORE the state update so the label is mode-aware
+            # from the first tick: cloud jobs upload audio to the
+            # provider and must not read "Transcribing locally".
             engine_obj = await self._acquire_engine()
+            stage_key = (
+                "job.transcribing_cloud"
+                if getattr(engine_obj, "name", None) == "cloud"
+                else "job.transcribing"
+            )
+            self._update(job_id, state="transcribing", percent=30,
+                         message=i18n.t(stage_key))
             try:
                 raw_words = await asyncio.to_thread(
                     engine_obj.transcribe, str(audio_path)

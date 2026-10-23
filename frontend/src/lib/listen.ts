@@ -19,8 +19,9 @@ export interface ListenWindow {
  *   or <= tStart) — the caller then plays without an auto-stop bound;
  * - end is clamped to `duration` so the auto-stop watcher ALWAYS fires
  *   (an end past the audio would never be reached by playtime updates).
- * A non-finite or negative duration is treated as 0, keeping the result
- * a plain number instead of leaking NaN into the progress highlight.
+ * A duration that is not a positive finite number (metadata not loaded
+ * yet) also yields a null end: playback continues like the pre-window
+ * behavior instead of pausing almost immediately after the seek.
  */
 export function listenWindow(
   tStart: number,
@@ -28,8 +29,10 @@ export function listenWindow(
   duration: number,
 ): ListenWindow {
   const start = Math.max(0, tStart - LISTEN_LEAD_S)
-  const ceiling = Number.isFinite(duration) && duration > 0 ? duration : 0
+  const durationKnown = Number.isFinite(duration) && duration > 0
   const end =
-    tEnd != null && tEnd > tStart ? Math.min(tEnd + LISTEN_TAIL_S, ceiling) : null
+    tEnd != null && tEnd > tStart && durationKnown
+      ? Math.min(tEnd + LISTEN_TAIL_S, duration)
+      : null
   return { start, end }
 }

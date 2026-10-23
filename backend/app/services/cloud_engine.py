@@ -155,8 +155,12 @@ class CloudEngine:
         finally:
             if own:
                 http.close()
+            # temps only, never the original — compare RESOLVED paths so
+            # a different spelling of the input (forward slashes, ./…)
+            # cannot trip the guard and delete the user's audio
+            original = Path(path).resolve()
             for chunk_path, _offset in parts:
-                if chunk_path != str(path):  # temps only, never the original
+                if Path(chunk_path).resolve() != original:
                     Path(chunk_path).unlink(missing_ok=True)
 
     # ------------------------------------------------------------- internals

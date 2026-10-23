@@ -246,13 +246,16 @@ def _split_mp3(
     )
     in_c = av.open(str(src))
     outputs: list[tuple[Any, Any, Path, float]] = []
+    created: list[Path] = []  # every temp touched, even pre-open failures
     samples = 0
+    ok = False
     try:
         for frame in in_c.decode(audio=0):
             for resampled in resampler.resample(frame):
                 index = samples // window  # window the frame STARTS in
                 while len(outputs) <= index:
                     path = tmp_dir / f"upload-{uuid.uuid4().hex}-{len(outputs)}.mp3"
+                    created.append(path)
                     container = av.open(str(path), "w")
                     stream = container.add_stream("mp3", rate=sample_rate)
                     stream.layout = "mono"
@@ -262,12 +265,16 @@ def _split_mp3(
                     )
                 samples += resampled.samples
                 _encode_frames(outputs[index][0], outputs[index][1], [resampled])
+        ok = True
     finally:
         for container, stream, _path, _off in outputs:
             for packet in stream.encode(None):
                 container.mux(packet)
             container.close()
         in_c.close()
+        if not ok:  # failure path: partial chunks must not leak
+            for path in created:
+                path.unlink(missing_ok=True)
     return [(str(path), offset) for _c, _s, path, offset in outputs]
 
 
@@ -292,9 +299,15 @@ def prepare_upload_audio(
         return [(str(src), 0.0)]
     tmp_dir = _upload_tmp_dir()
     whole = tmp_dir / f"upload-{uuid.uuid4().hex}.mp3"
-    _recompress_mp3(src, whole)
-    if whole.stat().st_size <= limit:
-        return [(str(whole), 0.0)]
-    chunks = _split_mp3(whole, tmp_dir, chunk_seconds)
+    try:
+        _recompress_mp3(src, whole)
+        if whole.stat().st_size <= limit:
+            return [(str(whole), 0.0)]
+        chunks = _split_mp3(whole, tmp_dir, chunk_seconds)
+    except BaseException:
+        # a partial recompressed file must not leak in the temp dir
+        # (``_split_mp3`` cleans up its own partial chunks)
+        whole.unlink(missing_ok=True)
+        raise
     whole.unlink(missing_ok=True)
     return chunks

@@ -134,6 +134,52 @@ async def test_pipeline_states_never_include_generating(tmp_db, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("engine_name", "key"),
+    [("fake", "job.transcribing"),
+     ("cloud", "job.transcribing_cloud")],
+    ids=["local-engine", "cloud-engine"],
+)
+async def test_transcribing_stage_label_follows_engine_mode(
+    tmp_db, tmp_path, engine_name, key
+):
+    """The transcribing message is mode-aware: a cloud job says the
+    cloud label (audio is uploaded to the provider), a local engine
+    keeps the local one. Read at transcribe time, when the stage row
+    is already visible to the UI."""
+    from app import i18n
+
+    captured: dict[str, str] = {}
+
+    class Engine:
+        async def acquire(self):
+            def transcribe(path):
+                job = jm.get(job_id)
+                captured["state"] = job["state"]
+                captured["message"] = job["message"]
+                return _raw_asr_words(["Hello", "there", "friend."])
+
+            return SimpleNamespace(name=engine_name, transcribe=transcribe)
+
+        async def release(self):
+            pass
+
+    jm = JobManager(conn=tmp_db, engine_manager=Engine(), data_dir=tmp_path)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3-fake")
+    job_id = await jm.create({
+        "name": "Label",
+        "source_type": "upload",
+        "audio_path": str(audio),
+        "data_dir": tmp_path,
+    })
+    job = await _run_to_completion(jm, job_id)
+    assert job["state"] == "done"
+    assert captured["state"] == "transcribing"
+    assert captured["message"] == i18n.t(key)
+
+
+@pytest.mark.asyncio
 async def test_url_import_passes_downloading_stage(
     tmp_db, tmp_path, monkeypatch
 ):

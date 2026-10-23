@@ -17,6 +17,7 @@ pattern); keys/URLs are fake.
 import json
 import math
 import struct
+import tempfile
 import wave
 from pathlib import Path
 
@@ -189,6 +190,52 @@ def test_chunk_window_default_is_ten_minutes():
     assert audio.CHUNK_SECONDS == 600.0
 
 
+def _upload_temps() -> set[Path]:
+    """Current contents of the shared upload temp dir (snapshot-diff
+    basis so tests never assert on other processes' leftovers)."""
+    tmp = Path(tempfile.gettempdir()) / "echopaper-upload"
+    return set(tmp.glob("upload-*.mp3")) if tmp.is_dir() else set()
+
+
+def test_prepare_recompress_failure_leaves_no_temps(tmp_path, monkeypatch):
+    """A failure inside the recompress step must unlink the partial
+    temp file it already wrote instead of leaking it."""
+    wav = write_wav(tmp_path / "big.wav", 1.0)
+    before = _upload_temps()
+
+    def failing_recompress(src, dst, **kw):
+        Path(dst).write_bytes(b"partial-mp3")  # partial output on disk
+        raise RuntimeError("encode exploded")
+
+    monkeypatch.setattr(audio, "_recompress_mp3", failing_recompress)
+    with pytest.raises(RuntimeError):
+        audio.prepare_upload_audio(str(wav), threshold_mb=0.0001)
+    assert _upload_temps() == before
+
+
+def test_prepare_split_failure_leaves_no_temps(tmp_path, monkeypatch):
+    """A failure inside the split step must unlink both the partial
+    chunks it already created and the recompressed intermediate."""
+    wav = write_wav(tmp_path / "long.wav", 3.0, rate=16000, channels=1)
+    before = _upload_temps()
+    real_encode = audio._encode_frames
+    calls = {"n": 0}
+
+    def failing_encode(container, stream, frames):
+        calls["n"] += 1
+        if calls["n"] > 1:  # chunk 0 exists on disk by now
+            raise RuntimeError("mux exploded")
+        real_encode(container, stream, frames)
+
+    monkeypatch.setattr(audio, "_encode_frames", failing_encode)
+    with pytest.raises(RuntimeError):
+        audio.prepare_upload_audio(
+            str(wav), threshold_mb=0.0001, chunk_seconds=1.5
+        )
+    assert calls["n"] > 1  # the failure really hit mid-split
+    assert _upload_temps() == before  # chunks AND 'whole' cleaned up
+
+
 # ---------------- verbose_json parsing ----------------
 
 
@@ -351,6 +398,19 @@ def test_transcribe_chunks_apply_offsets_and_clean_up(tmp_path, monkeypatch):
     assert not c1.exists()
     assert not c2.exists()
     assert wav.exists()
+
+
+def test_transcribe_never_deletes_original_on_path_spelling(tmp_path):
+    """A non-canonical spelling of the input path (forward slashes on
+    Windows) resolves to the same file: the original-vs-temp guard
+    must recognize it and leave the user's audio in place."""
+    wav = write_wav(tmp_path / "a.wav", 0.2)
+    spelled = str(wav).replace("\\", "/")
+    assert spelled != str(wav)  # the spelling really is non-canonical
+    engine, client = make_engine()
+    words = engine.transcribe(spelled, client=client)
+    assert words
+    assert wav.exists()  # original survives the temp cleanup
 
 
 # ---------------- test_cloud_connection (GET /models) ----------------

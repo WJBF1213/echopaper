@@ -30,10 +30,11 @@ describe('listen window helpers', () => {
     expect(listenWindow(30, 25, 100)).toEqual({ start: 24, end: null })
   })
 
-  it('treats non-finite or negative duration as 0 so the end clamps sanely', () => {
-    // min(tEnd + 6, 0) -> 0: a degenerate window instead of NaN leaking
-    // into the evidenceRange and breaking the auto-stop watcher.
-    expect(listenWindow(30, 40, Number.NaN)).toEqual({ start: 24, end: 0 })
-    expect(listenWindow(30, 40, -5)).toEqual({ start: 24, end: 0 })
+  it('returns a null end when duration is not a positive number', () => {
+    // metadata not loaded yet: no auto-stop bound (end: null) so
+    // playback continues like the pre-window behavior instead of the
+    // watcher pausing right after the seek.
+    expect(listenWindow(30, 40, Number.NaN)).toEqual({ start: 24, end: null })
+    expect(listenWindow(30, 40, -5)).toEqual({ start: 24, end: null })
   })
 })
