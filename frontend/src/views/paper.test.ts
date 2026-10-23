@@ -757,7 +757,7 @@ describe('PaperView audio experience', () => {
     wrapper.unmount()
   })
 
-  it('renders one regular 播放本题 button per item and seeks to the evidence start', async () => {
+  it('renders one regular 播放本题 button per item and seeks into the ±6s window', async () => {
     const wrapper = await mountView()
     await selectType(wrapper, '单选题')
     await generatePaper(wrapper)
@@ -774,17 +774,18 @@ describe('PaperView audio experience', () => {
     await flushPromises()
 
     await playButtons[0].trigger('click') // item 1, evidence 10-30
-    expect(audio.currentTime).toBeCloseTo(10)
+    // The seek lands 6s before the evidence start, not on it.
+    expect(audio.currentTime).toBeCloseTo(4)
     expect(audio.play).toHaveBeenCalled()
 
-    // The progress bar highlights the item's evidence interval.
+    // The progress bar highlights the widened listening window 4-36.
     const band = wrapper.find('.evidence-band')
     expect(band.exists()).toBe(true)
-    expect(band.attributes('style')).toContain('left: 5%')
-    expect(band.attributes('style')).toContain('width: 10%')
+    expect(band.attributes('style')).toContain('left: 2%')
+    expect(band.attributes('style')).toContain('width: 16%')
 
-    // Playback stops when it passes the evidence end.
-    audio.currentTime = 31
+    // Playback stops when it passes the window end (evidence end + 6).
+    audio.currentTime = 37
     audio.dispatchEvent(new Event('timeupdate'))
     await flushPromises()
     expect(audio.pause).toHaveBeenCalled()
@@ -890,10 +891,11 @@ describe('PaperView historical paper', () => {
     })
     const wrapper = await mountView('/paper/m1/p9?t=15.5')
     // The view waits briefly for the audio element to mount (same
-    // ?t= pattern as MaterialView) before seeking.
+    // ?t= pattern as MaterialView) before seeking, and backs the exact
+    // position up by the 6s listening lead margin.
     await new Promise((resolve) => setTimeout(resolve, 350))
     const audio = wrapper.find('audio').element as HTMLAudioElement
-    expect(audio.currentTime).toBeCloseTo(15.5)
+    expect(audio.currentTime).toBeCloseTo(9.5)
     wrapper.unmount()
   })
 

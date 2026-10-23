@@ -15,6 +15,7 @@ import {
 } from '../api'
 import { showToast } from '../router'
 import { locale, t } from '../i18n'
+import { LISTEN_LEAD_S, listenWindow } from '../lib/listen'
 import { usePlayer } from '../composables/usePlayer'
 import Icon from '../components/Icon.vue'
 import MapScene from '../components/MapScene.vue'
@@ -287,8 +288,10 @@ async function submitAnswers() {
   }
 }
 
-/** 播放本题: seek the persistent player to the item's evidence interval
- * and highlight it on the progress bar (design §六). */
+/** 播放本题: seek the persistent player into a ±6s listening window
+ * around the item's evidence interval (spec: 不要太精准，前后留几秒) and
+ * highlight that window on the progress bar (design §六). A null window
+ * end (missing/degenerate evidence interval) plays with no auto-stop. */
 function playItemAudio(item: ExamItem) {
   const evidence = item.evidence[0]
   if (!hasAudio.value || !evidence) return
@@ -297,11 +300,10 @@ function playItemAudio(item: ExamItem) {
     playingNumber.value = null
     return
   }
-  const start = Math.max(0, evidence.t_start || 0)
-  const end = evidence.t_end > evidence.t_start ? evidence.t_end : null
-  evidenceRange.value = end != null ? { start, end } : null
+  const window = listenWindow(evidence.t_start || 0, evidence.t_end, duration.value)
+  evidenceRange.value = window.end != null ? { start: window.start, end: window.end } : null
   playingNumber.value = item.number
-  seek(start, true)
+  seek(window.start, true)
 }
 
 /** Stop at the evidence end while a per-item playback is running. */
@@ -557,10 +559,12 @@ async function load() {
       }
     }
     // ?t= auto-seek (wrong-words 重听): same wiring as MaterialView --
-    // the number is the audio position to start playback from.
+    // the number is the audio position to start playback from, backed up
+    // by the listening lead margin so the sentence lead-in is audible
+    // (no end bound: no evidence interval is known here).
     const seekTo = Number(route.query.t)
     if (Number.isFinite(seekTo) && seekTo > 0) {
-      setTimeout(() => seek(seekTo, true), 300)
+      setTimeout(() => seek(Math.max(0, seekTo - LISTEN_LEAD_S), true), 300)
     }
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : String(err)
