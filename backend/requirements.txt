@@ -11,6 +11,5 @@ faster-whisper>=1.1
 # faster-whisper 1.2 passes metadata_errors to av.open; av 16 removed it.
 av>=11,<16
 
-# macOS (Apple Silicon) only: in-process MLX ASR engines
-mlx-whisper>=0.4 ; sys_platform == "darwin"
+# macOS (Apple Silicon) only: in-process MLX ASR engine
 parakeet-mlx>=0.4 ; sys_platform == "darwin"

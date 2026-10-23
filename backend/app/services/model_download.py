@@ -24,14 +24,9 @@ from pathlib import Path
 
 import httpx
 
-# ModelScope namespaces that mirror the common faster-whisper conversions.
+# ModelScope namespace mirroring the one fixed faster-whisper model.
 MODELSCOPE_REPOS = {
     "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
-    "large-v3": "mobiuslabsgmbh/faster-whisper-large-v3",
-    "medium": "mobiuslabsgmbh/faster-whisper-medium",
-    "small": "mobiuslabsgmbh/faster-whisper-small",
-    "base": "mobiuslabsgmbh/faster-whisper-base",
-    "tiny": "mobiuslabsgmbh/faster-whisper-tiny",
 }
 
 MODELSCOPE_BASE = "https://modelscope.cn/models/{repo}/resolve/master"

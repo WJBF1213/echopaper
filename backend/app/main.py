@@ -70,14 +70,7 @@ def create_app(
         except Exception:
             return None
 
-    def persist_engine(name: str) -> None:
-        current = asr_settings()
-        current["engine"] = name
-        db.set_setting(conn, "asr", current)
-
-    engine_manager.configure(
-        settings_fn=asr_settings, on_switch=persist_engine
-    )
+    engine_manager.configure(settings_fn=asr_settings)
 
     jobs_manager.configure(
         conn=conn,

@@ -661,21 +661,17 @@ def test_settings_test_llm_without_any_key(client, monkeypatch):
     assert "API key" in body["message"]
 
 
-def test_settings_engine_switch_triggers_manager(app, client, monkeypatch):
-    from app.services import engines as engines_mod
-
-    # Pretend this host can run every engine (Apple Silicon behaviour).
-    monkeypatch.setattr(
-        engines_mod, "available_engines", lambda *a, **k: engines_mod.ENGINE_NAMES
-    )
+def test_settings_put_rejects_removed_whisper_engine(app, client):
+    """"whisper" no longer exists: the old localized 400 still fires."""
     r = client.put("/api/settings", json={"asr": {"engine": "whisper"}})
-    assert r.status_code == 200
-    assert app.state.test_engine.switched == ["whisper"]
-    g = client.get("/api/settings").json()
-    assert g["asr"]["engine"] == "whisper"
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "whisper" in detail
+    # Nothing was persisted or switched.
+    assert app.state.test_engine.switched == []
 
 
-def test_settings_rejects_unavailable_engine(app, client, monkeypatch):
+def test_settings_put_rejects_platform_unavailable_engine(app, client, monkeypatch):
     from app.services import engines as engines_mod
 
     monkeypatch.setattr(
@@ -683,24 +679,59 @@ def test_settings_rejects_unavailable_engine(app, client, monkeypatch):
         "available_engines",
         lambda *a, **k: (engines_mod.FALLBACK_ENGINE,),
     )
-    default_engine = client.get("/api/settings").json()["asr"]["engine"]
+    derived = engines_mod.local_engine()
     r = client.put("/api/settings", json={"asr": {"engine": "parakeet"}})
     assert r.status_code == 400
     detail = r.json()["detail"]
     assert "parakeet" in detail and engines_mod.FALLBACK_ENGINE in detail
     # Nothing was persisted or switched.
     assert app.state.test_engine.switched == []
-    assert client.get("/api/settings").json()["asr"]["engine"] == default_engine
+    assert client.get("/api/settings").json()["asr"]["engine"] == derived
 
 
-def test_settings_asr_payload_platform_fields(client):
+def test_settings_put_engine_validated_but_never_stored(app, client, tmp_db):
+    """An available engine passes validation but is never persisted or
+    switched: the engine is always derived from the platform."""
+    from app import db as db_mod
+    from app.services import engines as engines_mod
+
+    r = client.put("/api/settings", json={
+        "asr": {"engine": engines_mod.FALLBACK_ENGINE, "idle_unload_min": 7},
+    })
+    assert r.status_code == 200
+    stored = db_mod.get_setting(tmp_db, "asr")
+    assert stored == {"idle_unload_min": 7}
+    assert app.state.test_engine.switched == []
+    asr = client.get("/api/settings").json()["asr"]
+    assert asr["engine"] == engines_mod.local_engine()
+    assert asr["idle_unload_min"] == 7
+
+
+def test_settings_asr_payload_is_engine_and_idle_only(client):
     from app.services import engines as engines_mod
 
     asr = client.get("/api/settings").json()["asr"]
-    assert asr["faster_whisper_model"]
-    assert tuple(asr["available_engines"]) == engines_mod.available_engines()
-    assert asr["default_engine"] == engines_mod.default_engine()
-    assert asr["engine"] in asr["available_engines"]
+    assert asr == {
+        "engine": engines_mod.local_engine(),
+        "idle_unload_min": 10,
+    }
+
+
+def test_settings_legacy_asr_row_ignores_unknown_subkeys(app, client, tmp_db):
+    """A DB row from the three-engine era must not crash or leak through."""
+    from app import db as db_mod
+    from app.services import engines as engines_mod
+
+    db_mod.set_setting(
+        tmp_db, "asr",
+        {"engine": "whisper", "whisper_model": "x", "parakeet_model": "y",
+         "idle_unload_min": 3},
+    )
+    asr = client.get("/api/settings").json()["asr"]
+    assert asr == {
+        "engine": engines_mod.local_engine(),
+        "idle_unload_min": 3,
+    }
 
 
 def test_asr_status_and_unload(client):

@@ -1,16 +1,17 @@
 """ASR engine lifecycle manager (Task B9, spec §7).
 
-Three engines, one interface:
-- ``parakeet`` / ``whisper``: MLX/Metal, Apple Silicon only
-- ``faster_whisper``: CTranslate2, Windows / macOS / Linux (CUDA or CPU)
+Two local engines, one interface, one fixed engine+model per platform:
+- ``parakeet`` / ``PARAKEET_MODEL``: MLX/Metal, Apple Silicon only
+- ``faster_whisper`` / ``FASTER_WHISPER_MODEL``: CTranslate2, Windows /
+  Linux / Intel macOS (CUDA or CPU)
 
-Availability is platform-aware: Apple Silicon exposes all three, every
-other machine exposes only faster-whisper. Lazy load on first
-transcription, idle auto-unload with gc, immediate unload on switch. One
-asyncio lock serializes lifecycle operations; a semaphore serializes
-transcriptions (acquire..release). Busy -> unload / switch are REJECTED,
-never deadlock. Engine imports happen only inside the concrete engine
-constructors (lazy), so this module imports cleanly on any platform.
+The engine is always derived from the platform (``local_engine()``); it is
+never stored or user-selected. Lazy load on first transcription, idle
+auto-unload with gc, immediate unload on switch. One asyncio lock
+serializes lifecycle operations; a semaphore serializes transcriptions
+(acquire..release). Busy -> unload / switch are REJECTED, never deadlock.
+Engine imports happen only inside the concrete engine constructors (lazy),
+so this module imports cleanly on any platform.
 
 Stdlib + engines only; no framework imports.
 """
@@ -25,8 +26,16 @@ from typing import Any, Callable, Protocol
 
 from app import i18n
 
-ENGINE_NAMES = ("parakeet", "whisper", "faster_whisper")
+ENGINE_NAMES = ("parakeet", "faster_whisper")
 FALLBACK_ENGINE = "faster_whisper"
+PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
+FASTER_WHISPER_MODEL = "large-v3-turbo"
+
+#: the one fixed model per local engine
+ENGINE_MODELS = {
+    "parakeet": PARAKEET_MODEL,
+    FALLBACK_ENGINE: FASTER_WHISPER_MODEL,
+}
 
 
 class EngineError(Exception):
@@ -50,7 +59,7 @@ def _is_apple_silicon(
 def available_engines(
     platform_name: str | None = None, machine: str | None = None
 ) -> tuple[str, ...]:
-    """Engines that can actually run on this machine.
+    """Local engines that can actually run on this machine.
 
     MLX requires Apple Silicon; Intel Macs (and everything else) use
     faster-whisper, which is the universal CTranslate2 path.
@@ -60,10 +69,15 @@ def available_engines(
     return (FALLBACK_ENGINE,)
 
 
-def default_engine(
+def local_engine(
     platform_name: str | None = None, machine: str | None = None
 ) -> str:
-    return "parakeet" if _is_apple_silicon(platform_name, machine) else FALLBACK_ENGINE
+    """The one local engine for this platform — never stored, never chosen."""
+    return (
+        "parakeet"
+        if _is_apple_silicon(platform_name, machine)
+        else FALLBACK_ENGINE
+    )
 
 
 def default_factory(engine_name: str, model: str) -> Any:
@@ -72,10 +86,6 @@ def default_factory(engine_name: str, model: str) -> Any:
         from app.services.parakeet_engine import ParakeetEngine
 
         return ParakeetEngine(model)
-    if engine_name == "whisper":
-        from app.services.whisper_engine import WhisperEngine
-
-        return WhisperEngine(model)
     if engine_name == FALLBACK_ENGINE:
         from app.services.faster_whisper_engine import FasterWhisperEngine
 
@@ -83,13 +93,7 @@ def default_factory(engine_name: str, model: str) -> Any:
     raise EngineError(i18n.t("engine.unknown", name=engine_name))
 
 
-DEFAULT_SETTINGS: dict[str, Any] = {
-    "engine": default_engine(),
-    "parakeet_model": "mlx-community/parakeet-tdt-0.6b-v3",
-    "whisper_model": "mlx-community/whisper-large-v3-turbo",
-    "faster_whisper_model": "large-v3-turbo",
-    "idle_unload_min": 10,
-}
+DEFAULT_SETTINGS: dict[str, Any] = {"idle_unload_min": 10}
 
 
 class EngineManager:
@@ -109,16 +113,12 @@ class EngineManager:
 
         self._engine: Any = None
         self._loaded_name: str | None = None
-        self._engine_name: str | None = None  # selected (persisted via hook)
+        self._engine_name: str | None = None  # explicit switch; None = platform
         self._lock = asyncio.Lock()  # lifecycle: load/unload/switch
         self._gate = asyncio.Semaphore(1)  # one transcription at a time
         self._busy = False
         self._state = "unloaded"  # unloaded | loading | ready | error
         self._detail: str | None = None
-        # Informational warning kept apart from _detail (which holds the
-        # latest load/busy error) so a platform fallback stays visible after
-        # the fallback engine loads successfully.
-        self._fallback_detail: str | None = None
         self._last_used: float | None = None
         self._timer: asyncio.Task | None = None
 
@@ -132,8 +132,7 @@ class EngineManager:
             self._settings_fn = settings_fn
         if on_switch is not None:
             self._on_switch = on_switch
-        self._engine_name = None  # re-read selected engine from new settings
-        self._fallback_detail = None
+        self._engine_name = None  # re-derive the engine from the platform
 
     # ------------------------------------------------------------------ util
     def _settings(self) -> dict:
@@ -143,17 +142,7 @@ class EngineManager:
 
     def _current_name(self) -> str:
         if self._engine_name is None:
-            stored = self._settings().get("engine") or default_engine()
-            self._fallback_detail = None
-            # A .env copied from a Mac may name an MLX engine; on other
-            # platforms fall back instead of failing every transcription.
-            if stored not in available_engines():
-                fallback = default_engine()
-                self._fallback_detail = i18n.t(
-                    "engine.fallback", requested=stored, fallback=fallback
-                )
-                stored = fallback
-            self._engine_name = stored
+            self._engine_name = local_engine()
         return self._engine_name
 
     def status(self) -> dict:
@@ -162,14 +151,13 @@ class EngineManager:
         out: dict = {
             "state": self._state,
             "engine": name,
-            "model": s.get(f"{name}_model", ""),
+            "model": ENGINE_MODELS.get(name, ""),
             "idle_unload_min": s.get("idle_unload_min", 10),
         }
         if self._last_used is not None:
             out["last_used"] = self._last_used
-        detail = self._detail or self._fallback_detail
-        if detail:
-            out["detail"] = detail
+        if self._detail:
+            out["detail"] = self._detail
         return out
 
     # -------------------------------------------------------------- lifecycle
@@ -177,7 +165,7 @@ class EngineManager:
         self._cancel_timer()
         self._state = "loading"
         self._detail = None
-        model = self._settings().get(f"{engine_name}_model", "")
+        model = ENGINE_MODELS.get(engine_name, "")
         try:
             engine = await asyncio.to_thread(self._factory, engine_name, model)
         except Exception as exc:
@@ -287,7 +275,6 @@ class EngineManager:
             if self._engine is not None:
                 self._drop_locked()
             self._engine_name = engine_name
-            self._fallback_detail = None
             try:
                 self._on_switch(engine_name)
             except Exception:

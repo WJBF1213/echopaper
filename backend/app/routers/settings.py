@@ -13,6 +13,11 @@ from app.services import llm as llm_mod
 
 router = APIRouter()
 
+#: stored ``asr`` subkeys the readers honor. Legacy rows from the
+#: three-engine era may still carry ``engine`` / ``*_model`` subkeys;
+#: they are ignored, and a fresh PUT rewrites the row without them.
+_ASR_STORED_KEYS = ("idle_unload_min",)
+
 
 def effective_settings(conn) -> dict:
     """config(.env/env) defaults overlaid by stored DB settings."""
@@ -26,19 +31,18 @@ def effective_settings(conn) -> dict:
             "max_context_tokens": s.llm.max_context_tokens,
         },
         "asr": {
-            "engine": s.asr.engine,
-            "parakeet_model": s.asr.parakeet_model,
-            "whisper_model": s.asr.whisper_model,
-            "faster_whisper_model": s.asr.faster_whisper_model,
+            "engine": engines_mod.local_engine(),
             "idle_unload_min": s.asr.idle_unload_min,
-            "available_engines": list(engines_mod.available_engines()),
-            "default_engine": engines_mod.default_engine(),
         },
     }
-    for key in ("llm", "asr"):
-        stored = db.get_setting(conn, key)
-        if isinstance(stored, dict):
-            out[key].update(stored)
+    stored = db.get_setting(conn, "llm")
+    if isinstance(stored, dict):
+        out["llm"].update(stored)
+    stored = db.get_setting(conn, "asr")
+    if isinstance(stored, dict):
+        for key in _ASR_STORED_KEYS:
+            if key in stored:
+                out["asr"][key] = stored[key]
     out["llm"]["max_context_tokens"] = llm_mod.clamp_max_context(
         out["llm"].get("max_context_tokens")
     )
@@ -92,23 +96,25 @@ async def put_settings(body: SettingsIn, request: Request):
         db.set_setting(conn, "llm", current["llm"])
     if body.asr is not None:
         patch = body.asr.model_dump(exclude_none=True)
-        old_engine = current["asr"].get("engine")
-        if patch.get("engine") and patch["engine"] not in engines_mod.available_engines():
+        engine = patch.pop("engine", None)
+        if engine and engine not in engines_mod.available_engines():
             raise HTTPException(
                 status_code=400,
                 detail=i18n.t(
                     "engine.unsupported",
-                    name=patch["engine"],
+                    name=engine,
                     available=", ".join(engines_mod.available_engines()),
                 ),
             )
-        current["asr"].update(patch)
-        db.set_setting(conn, "asr", current["asr"])
-        new_engine = current["asr"].get("engine")
-        if patch.get("engine") and new_engine != old_engine:
-            result = await request.app.state.engine_manager.switch(new_engine)
-            if result.get("busy"):
-                raise HTTPException(status_code=409, detail=result.get("detail"))
+        # The engine is always derived from the platform: an available value
+        # passes validation but is neither persisted nor switched.
+        stored = db.get_setting(conn, "asr")
+        base = (
+            {k: stored[k] for k in _ASR_STORED_KEYS if k in stored}
+            if isinstance(stored, dict)
+            else {}
+        )
+        db.set_setting(conn, "asr", {**base, **patch})
 
     return _public(effective_settings(conn))
 

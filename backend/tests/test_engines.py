@@ -13,15 +13,17 @@ from app.services.engines import EngineError, EngineManager
 
 
 @pytest.fixture(autouse=True)
-def all_engines(request, monkeypatch):
-    """Manager tests exercise the dual-MLX lifecycle on every platform.
+def parakeet_host(request, monkeypatch):
+    """Manager tests run as if on Apple Silicon (both local engines).
 
-    Availability tests that assert real platform detection opt out with
-    ``@pytest.mark.real_platform``.
+    The engine is platform-derived, so tests pin ``local_engine`` to
+    parakeet and expose every engine. Tests that assert real platform
+    detection opt out with ``@pytest.mark.real_platform``.
     """
     if request.node.get_closest_marker("real_platform"):
         return
     monkeypatch.setattr(engines, "available_engines", lambda *a, **k: engines.ENGINE_NAMES)
+    monkeypatch.setattr(engines, "local_engine", lambda *a, **k: "parakeet")
 
 
 class FakeEngine:
@@ -37,12 +39,7 @@ class FakeEngine:
 
 def make_manager(settings=None, factory=None, sleep_fn=None):
     events = []
-    settings = settings or {
-        "engine": "parakeet",
-        "parakeet_model": "p-model",
-        "whisper_model": "w-model",
-        "idle_unload_min": 10,
-    }
+    settings = settings or {"idle_unload_min": 10}
 
     def default_factory(engine_name, model):
         events.append(("load", engine_name, model))
@@ -58,6 +55,42 @@ def make_manager(settings=None, factory=None, sleep_fn=None):
     return mgr, events, settings
 
 
+# ---------------- module surface: one engine+model per platform ----------------
+
+def test_engine_names_are_exactly_the_two_local_engines():
+    assert engines.ENGINE_NAMES == ("parakeet", "faster_whisper")
+    assert "whisper" not in engines.ENGINE_NAMES
+
+
+def test_fixed_model_constants():
+    assert engines.PARAKEET_MODEL == "mlx-community/parakeet-tdt-0.6b-v3"
+    assert engines.FASTER_WHISPER_MODEL == "large-v3-turbo"
+
+
+@pytest.mark.real_platform
+def test_local_engine_and_availability_apple_silicon():
+    assert engines.available_engines("darwin", "arm64") == engines.ENGINE_NAMES
+    assert engines.local_engine("darwin", "arm64") == "parakeet"
+
+
+@pytest.mark.real_platform
+def test_local_engine_and_availability_other_platforms():
+    # Intel Macs and every non-darwin platform only get CTranslate2.
+    for platform_name, machine in (
+        ("darwin", "x86_64"),
+        ("win32", "AMD64"),
+        ("linux", "x86_64"),
+    ):
+        assert engines.available_engines(platform_name, machine) == (
+            engines.FALLBACK_ENGINE,
+        )
+        assert engines.local_engine(platform_name, machine) == (
+            engines.FALLBACK_ENGINE
+        )
+
+
+# ---------------- lifecycle ----------------
+
 @pytest.mark.asyncio
 async def test_lazy_load_and_unload():
     mgr, events, _ = make_manager()
@@ -66,10 +99,12 @@ async def test_lazy_load_and_unload():
 
     eng = await mgr.acquire()
     assert mgr.status()["state"] == "ready"
-    assert events == [("load", "parakeet", "p-model")]
+    assert events == [("load", "parakeet", engines.PARAKEET_MODEL)]
     await mgr.release()
     st = mgr.status()
     assert st["state"] == "ready"  # still loaded, idle timer pending
+    assert st["engine"] == "parakeet"
+    assert st["model"] == engines.PARAKEET_MODEL
     assert st["last_used"] is not None
 
     result = await mgr.unload_now()
@@ -80,7 +115,25 @@ async def test_lazy_load_and_unload():
     await mgr.acquire()
     await mgr.release()
     await mgr.unload_now()
-    assert events.count(("load", "parakeet", "p-model")) == 2
+    assert events.count(("load", "parakeet", engines.PARAKEET_MODEL)) == 2
+
+
+@pytest.mark.asyncio
+async def test_legacy_settings_engine_and_models_are_ignored():
+    """A stored row from the three-engine era must not select anything."""
+    mgr, events, _ = make_manager()
+    mgr._settings_fn = lambda: {
+        "engine": "whisper",
+        "whisper_model": "legacy",
+        "parakeet_model": "legacy",
+        "faster_whisper_model": "legacy",
+        "idle_unload_min": 10,
+    }
+    eng = await mgr.acquire()
+    assert eng.engine_name == "parakeet"  # platform-derived
+    assert events[-1] == ("load", "parakeet", engines.PARAKEET_MODEL)
+    await mgr.release()
+    await mgr.unload_now()
 
 
 @pytest.mark.asyncio
@@ -88,15 +141,16 @@ async def test_switch_unloads_current():
     mgr, events, settings = make_manager()
     await mgr.acquire()
     await mgr.release()
-    await mgr.switch("whisper")
+    await mgr.switch("faster_whisper")
     assert ("unload", "parakeet") in events
-    assert ("switch", "whisper") in events
+    assert ("switch", "faster_whisper") in events
     st = mgr.status()
     assert st["state"] == "unloaded"
-    assert st["engine"] == "whisper"
+    assert st["engine"] == "faster_whisper"
+    assert st["model"] == engines.FASTER_WHISPER_MODEL
     # next transcription loads the NEW engine
     eng = await mgr.acquire()
-    assert eng.engine_name == "whisper"
+    assert eng.engine_name == "faster_whisper"
     await mgr.release()
     await mgr.unload_now()
 
@@ -108,7 +162,7 @@ async def test_busy_rejects_unload_during_transcribe():
     busy = await mgr.unload_now()
     assert busy["state"] == "ready"
     assert "busy" in (busy.get("detail") or "").lower() or busy.get("busy")
-    busy_switch = await mgr.switch("whisper")
+    busy_switch = await mgr.switch("faster_whisper")
     assert "busy" in (busy_switch.get("detail") or "").lower() or busy_switch.get("busy")
     assert mgr.status()["engine"] == "parakeet"  # unchanged
     await mgr.release()
@@ -178,11 +232,21 @@ async def test_load_failure_sets_error_and_recovers():
     assert st["state"] == "error"
     assert "mlx not available" in (st.get("detail") or "")
 
-    await mgr.switch("whisper")
+    await mgr.switch("faster_whisper")
     eng = await mgr.acquire()  # other engine unaffected
-    assert eng.engine_name == "whisper"
+    assert eng.engine_name == "faster_whisper"
     await mgr.release()
     await mgr.unload_now()
+
+
+@pytest.mark.asyncio
+async def test_switch_to_unavailable_engine_rejected(monkeypatch):
+    monkeypatch.setattr(
+        engines, "available_engines", lambda *a, **k: (engines.FALLBACK_ENGINE,)
+    )
+    mgr, _, _ = make_manager()
+    with pytest.raises(EngineError):
+        await mgr.switch("parakeet")
 
 
 # ---------------- adapter mapping tests (no real MLX needed) ----------------
@@ -213,29 +277,6 @@ def test_parakeet_flat_tokens_mapping():
                 SimpleNamespace(text="two", start=0.3, end=0.4)]
     )
     assert [w["w"] for w in result_to_words(result)] == ["one", "two"]
-
-
-def test_whisper_result_mapping():
-    from app.services.whisper_engine import result_to_words
-
-    result = {
-        "segments": [
-            {
-                "words": [
-                    {"word": " Hello", "start": 0.0, "end": 0.3,
-                     "probability": 0.98},
-                    {"word": " there", "start": 0.3, "end": 0.6,
-                     "probability": 0.91},
-                ]
-            },
-            {"words": [{"word": " world", "start": 0.7, "end": 1.0,
-                        "probability": 0.85}]},
-        ]
-    }
-    words = result_to_words(result)
-    assert words[0] == {"w": "Hello", "s": 0.0, "e": 0.3, "p": 0.98}
-    assert [w["w"] for w in words] == ["Hello", "there", "world"]
-    assert all(0.0 <= w["p"] <= 1.0 for w in words)
 
 
 def test_faster_whisper_result_mapping():
@@ -286,7 +327,6 @@ def test_engines_module_importable_without_mlx():
     # importing the manager must never pull MLX (Windows CI constraint)
     import sys
 
-    assert "mlx_whisper" not in sys.modules
     assert "parakeet_mlx" not in sys.modules
     assert hasattr(engines, "manager")
 
@@ -313,90 +353,3 @@ def test_importing_engines_stays_lazy_for_faster_whisper():
         text=True,
     )
     assert proc.returncode == 0, proc.stderr
-
-
-@pytest.mark.real_platform
-def test_available_engines_apple_silicon():
-    assert engines.available_engines("darwin", "arm64") == engines.ENGINE_NAMES
-    assert engines.default_engine("darwin", "arm64") == "parakeet"
-
-
-@pytest.mark.real_platform
-def test_available_engines_other_platforms():
-    # Intel Macs and every non-darwin platform only get CTranslate2.
-    for platform_name, machine in (
-        ("darwin", "x86_64"),
-        ("win32", "AMD64"),
-        ("linux", "x86_64"),
-    ):
-        assert engines.available_engines(platform_name, machine) == (
-            engines.FALLBACK_ENGINE,
-        )
-        assert engines.default_engine(platform_name, machine) == (
-            engines.FALLBACK_ENGINE
-        )
-
-
-@pytest.mark.asyncio
-async def test_unavailable_engine_falls_back(monkeypatch):
-    monkeypatch.setattr(
-        engines, "available_engines", lambda *a, **k: (engines.FALLBACK_ENGINE,)
-    )
-    monkeypatch.setattr(
-        engines, "default_engine", lambda *a, **k: engines.FALLBACK_ENGINE
-    )
-    mgr, events, _ = make_manager()
-    # A copied Mac .env still names parakeet.
-    mgr._engine_name = None
-    mgr._settings_fn = lambda: {
-        "engine": "parakeet",
-        "parakeet_model": "p-model",
-        "faster_whisper_model": "fw-model",
-        "idle_unload_min": 10,
-    }
-    eng = await mgr.acquire()
-    assert eng.engine_name == engines.FALLBACK_ENGINE
-    assert events[-1] == ("load", engines.FALLBACK_ENGINE, "fw-model")
-    detail = mgr.status().get("detail") or ""
-    # The warning must survive a successful fallback-engine load.
-    assert "不支持" in detail
-    assert "parakeet" in detail and engines.FALLBACK_ENGINE in detail
-    await mgr.release()
-    await mgr.unload_now()
-
-
-@pytest.mark.asyncio
-async def test_switch_to_unavailable_engine_rejected(monkeypatch):
-    monkeypatch.setattr(
-        engines, "available_engines", lambda *a, **k: (engines.FALLBACK_ENGINE,)
-    )
-    mgr, _, _ = make_manager()
-    with pytest.raises(EngineError):
-        await mgr.switch("parakeet")
-
-
-@pytest.mark.asyncio
-async def test_explicit_switch_clears_fallback_detail(monkeypatch):
-    monkeypatch.setattr(
-        engines, "available_engines", lambda *a, **k: (engines.FALLBACK_ENGINE,)
-    )
-    monkeypatch.setattr(
-        engines, "default_engine", lambda *a, **k: engines.FALLBACK_ENGINE
-    )
-    mgr, _, _ = make_manager()
-    mgr._settings_fn = lambda: {
-        "engine": "whisper",
-        "faster_whisper_model": "fw-model",
-        "idle_unload_min": 0,
-    }
-    await mgr.acquire()
-    with pytest.raises(EngineError):
-        await mgr.switch("whisper")
-    # The manager still advertises the fallback, but an explicit request
-    # for an unavailable engine must not silently change the selection.
-    assert mgr.status()["engine"] == engines.FALLBACK_ENGINE
-    assert mgr.status().get("detail")
-    await mgr.release()
-    await mgr.unload_now()
-    await mgr.switch(engines.FALLBACK_ENGINE)
-    assert "detail" not in mgr.status()

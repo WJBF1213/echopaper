@@ -24,10 +24,9 @@ class LlmTestIn(BaseModel):
 
 
 class AsrSettingsIn(BaseModel):
+    # Validated then ignored: the engine is always derived from the
+    # platform (services.engines.local_engine), never stored or switched.
     engine: Optional[str] = None
-    parakeet_model: Optional[str] = None
-    whisper_model: Optional[str] = None
-    faster_whisper_model: Optional[str] = None
     idle_unload_min: Optional[int] = None
 
 

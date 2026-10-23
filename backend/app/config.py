@@ -18,13 +18,6 @@ _ENV_KEYS = {
     "HF_HOME": ("hf_home", str),
     "HF_ENDPOINT": ("hf_endpoint", str),
     "PIP_INDEX_URL": ("pip_index_url", str),
-    "ASR_ENGINE": ("asr.engine", str),
-    "ASR_PARAKEET_MODEL": ("asr.parakeet_model", str),
-    "ASR_WHISPER_MODEL": ("asr.whisper_model", str),
-    "ASR_FASTER_WHISPER_MODEL": ("asr.faster_whisper_model", str),
-    "PARAKEET_MODEL": ("asr.parakeet_model", str),
-    "WHISPER_MODEL": ("asr.whisper_model", str),
-    "FASTER_WHISPER_MODEL": ("asr.faster_whisper_model", str),
     "ASR_IDLE_UNLOAD_MIN": ("asr.idle_unload_min", int),
     "LLM_PROVIDER": ("llm.provider", str),
     "LLM_BASE_URL": ("llm.base_url", str),
@@ -36,19 +29,10 @@ _ENV_KEYS = {
 
 @dataclass
 class AsrSettings:
-    # Apple Silicon defaults to parakeet (MLX); every other machine uses
-    # faster-whisper (CTranslate2, CUDA/CPU) because MLX is macOS-only.
-    engine: str = "parakeet"
-    parakeet_model: str = "mlx-community/parakeet-tdt-0.6b-v3"
-    whisper_model: str = "mlx-community/whisper-large-v3-turbo"
-    faster_whisper_model: str = "large-v3-turbo"
+    # The engine+model are platform-fixed (services.engines.local_engine /
+    # PARAKEET_MODEL / FASTER_WHISPER_MODEL); the only tunable is the idle
+    # unload delay. Legacy engine/model env keys and DB subkeys are ignored.
     idle_unload_min: int = 10  # 0 disables idle unload
-
-    def __post_init__(self) -> None:
-        from app.services.engines import default_engine
-
-        if self.engine == "parakeet" and default_engine() != "parakeet":
-            self.engine = default_engine()
 
 
 @dataclass

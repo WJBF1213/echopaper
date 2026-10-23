@@ -101,8 +101,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         # --- engines -------------------------------------------------------
         "engine.unknown": "未知引擎：{name}",
         "engine.unsupported": "当前系统不支持引擎 {name}；可用引擎：{available}",
-        "engine.fallback": "当前系统不支持 {requested} 引擎，已自动使用 {fallback}",
-        "engine.load_failed": "{engine} 引擎加载失败：{error}；请在设置页更换引擎或模型",
+        "engine.load_failed": "{engine} 引擎加载失败：{error}",
         "engine.busy_switch": "busy：转写进行中，禁止切换",
         "engine.busy_unload": "busy：转写进行中，禁止卸载",
         "engine.unloaded_retry": "引擎已被卸载，请重试",
@@ -170,13 +169,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "engine.unsupported": (
             "Engine {name} is not supported on this system; available: {available}"
         ),
-        "engine.fallback": (
-            "Engine {requested} is not supported here; using {fallback} instead"
-        ),
-        "engine.load_failed": (
-            "Failed to load the {engine} engine: {error}. "
-            "Pick another engine or model in Settings"
-        ),
+        "engine.load_failed": "Failed to load the {engine} engine: {error}",
         "engine.busy_switch": "busy: transcription in progress, cannot switch engines",
         "engine.busy_unload": "busy: transcription in progress, cannot unload",
         "engine.unloaded_retry": "Engine was unloaded; please retry",
