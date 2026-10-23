@@ -384,7 +384,7 @@ data/                   运行时：app.db（schema v3）、audio/（Git 忽略�
 docs/                   设计与参考文档（以中文为主）
 start-windows.bat / stop-windows.bat             Windows 启动/停止
 start-macos.command / stop-macos.command         macOS 启动/停止
-LICENSE                 MIT
+LICENSE                 GPL-3.0
 ```
 
 ## 文档索引
@@ -407,7 +407,7 @@ LICENSE                 MIT
 
 ## 许可证
 
-[MIT](LICENSE) © 2026 EchoPaper contributors。
+[GPL-3.0](LICENSE) © 2026 EchoPaper contributors。
 
 欢迎贡献——请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。请勿提交 API 密钥、
 `data/` 或受版权保护的音频（`test_sound/`）；安全相关说明见

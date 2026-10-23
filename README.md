@@ -450,7 +450,7 @@ data/                   Runtime: app.db (schema v3), audio/ (ignored by Git)
 docs/                   Design and reference docs (mostly Chinese)
 start-windows.bat / stop-windows.bat             Windows launchers
 start-macos.command / stop-macos.command         macOS launchers
-LICENSE                 MIT
+LICENSE                 GPL-3.0
 ```
 
 ## Documentation
@@ -478,7 +478,7 @@ LICENSE                 MIT
 
 ## License
 
-[MIT](LICENSE) © 2026 EchoPaper contributors.
+[GPL-3.0](LICENSE) © 2026 EchoPaper contributors.
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Please do not
 commit API keys, `data/`, or copyrighted audio (`test_sound/`); see
