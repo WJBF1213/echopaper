@@ -80,7 +80,7 @@ Windows 与 macOS 为受支持平台。Intel Mac 和 Linux 可运行应用，并
 
 - **Python 3.10+**
 - **ffmpeg** 在 `PATH` 中（所有 ASR 引擎解码音频都需要）
-- **Node.js 20.19+（或 22.12+）**：从源码构建前端时需要（Vite 7 要求）
+- **Node.js 24+（jsdom 30/undici 8 的 zstd 依赖所需）**：从源码构建前端时需要（Vite 7 要求）
 
 ## 快速开始
 

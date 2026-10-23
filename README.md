@@ -103,7 +103,7 @@ Common requirements:
 
 - **Python 3.10+**
 - **ffmpeg** on `PATH` (audio decoding for all ASR engines)
-- **Node.js 20.19+ (or 22.12+)** when you build the frontend from source
+- **Node.js 24+ (required by jsdom 30 / undici 8 zstd support)** when you build the frontend from source
   (Vite 7 requirement)
 
 ## Quick start
