@@ -19,6 +19,10 @@ _ENV_KEYS = {
     "HF_ENDPOINT": ("hf_endpoint", str),
     "PIP_INDEX_URL": ("pip_index_url", str),
     "ASR_IDLE_UNLOAD_MIN": ("asr.idle_unload_min", int),
+    "ASR_MODE": ("asr.mode", str),
+    "ASR_CLOUD_BASE_URL": ("asr.cloud_base_url", str),
+    "ASR_CLOUD_MODEL": ("asr.cloud_model", str),
+    "ASR_CLOUD_API_KEY": ("asr.cloud_api_key", str),
     "LLM_PROVIDER": ("llm.provider", str),
     "LLM_BASE_URL": ("llm.base_url", str),
     "LLM_MODEL": ("llm.model", str),
@@ -29,10 +33,16 @@ _ENV_KEYS = {
 
 @dataclass
 class AsrSettings:
-    # The engine+model are platform-fixed (services.engines.local_engine /
-    # PARAKEET_MODEL / FASTER_WHISPER_MODEL); the only tunable is the idle
-    # unload delay. Legacy engine/model env keys and DB subkeys are ignored.
+    # Local engine+model are platform-fixed (services.engines.local_engine /
+    # PARAKEET_MODEL / FASTER_WHISPER_MODEL). ``mode`` selects local vs the
+    # cloud engine; the cloud_* fields configure the OpenAI-compatible
+    # transcription endpoint (Groq defaults). Legacy engine/model env keys
+    # and DB subkeys are ignored.
+    mode: str = "local"  # local | cloud
     idle_unload_min: int = 10  # 0 disables idle unload
+    cloud_base_url: str = "https://api.groq.com/openai/v1"
+    cloud_model: str = "whisper-large-v3-turbo"
+    cloud_api_key: str = ""
 
 
 @dataclass

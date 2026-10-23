@@ -106,6 +106,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "engine.busy_unload": "busy：转写进行中，禁止卸载",
         "engine.unloaded_retry": "引擎已被卸载，请重试",
         "engine.changed_wait": "引擎选择已变更，请等待当前转写完成",
+        # --- cloud ASR (Task 3) -------------------------------------------
+        "asr.no_key": "未配置云端转写 API key：请先在设置中保存密钥",
+        "asr.invalid_mode": "无效的识别模式：{mode}（可选：{available}）",
+        "asr.request_failed": "云端转写失败：{error}",
+        "asr.test_ok": "连接正常",
+        "asr.test_model_missing": "连接正常，但模型 {model} 不在服务方模型列表中",
+        "asr.test_key_invalid": "API key 无效（HTTP 401/403）",
+        "asr.test_unreachable": "无法连接云端服务（超时或网络错误）",
         # --- LLM -----------------------------------------------------------
         "llm.incomplete": "LLM 配置不完整：provider={provider} 需要 base_url 与 model",
         "llm.truncated": "finish_reason={reason}（输出被截断）",
@@ -174,6 +182,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "engine.busy_unload": "busy: transcription in progress, cannot unload",
         "engine.unloaded_retry": "Engine was unloaded; please retry",
         "engine.changed_wait": "Engine selection changed; wait for the current transcription",
+        # --- cloud ASR (Task 3) -------------------------------------------
+        "asr.no_key": "No cloud transcription API key configured. Save one in Settings first",
+        "asr.invalid_mode": "Invalid ASR mode: {mode} (allowed: {available})",
+        "asr.request_failed": "Cloud transcription failed: {error}",
+        "asr.test_ok": "Connection OK",
+        "asr.test_model_missing": (
+            "Connection OK, but model {model} is not in the provider's model list"
+        ),
+        "asr.test_key_invalid": "API key rejected (HTTP 401/403)",
+        "asr.test_unreachable": "Could not reach the cloud service (timeout or network error)",
         # --- LLM -----------------------------------------------------------
         "llm.incomplete": "Incomplete LLM config: provider={provider} needs base_url and model",
         "llm.truncated": "finish_reason={reason} (output truncated)",

@@ -1,17 +1,21 @@
-"""ASR engine lifecycle manager (Task B9, spec §7).
+"""ASR engine lifecycle manager (Task B9, spec §7; cloud mode in Task 3).
 
-Two local engines, one interface, one fixed engine+model per platform:
+Local engines, one interface, one fixed engine+model per platform:
 - ``parakeet`` / ``PARAKEET_MODEL``: MLX/Metal, Apple Silicon only
 - ``faster_whisper`` / ``FASTER_WHISPER_MODEL``: CTranslate2, Windows /
   Linux / Intel macOS (CUDA or CPU)
 
-The engine is always derived from the platform (``local_engine()``); it is
-never stored or user-selected. Lazy load on first transcription, idle
-auto-unload with gc, immediate unload on switch. One asyncio lock
-serializes lifecycle operations; a semaphore serializes transcriptions
-(acquire..release). Busy -> unload / switch are REJECTED, never deadlock.
-Engine imports happen only inside the concrete engine constructors (lazy),
-so this module imports cleanly on any platform.
+The local engine is always derived from the platform
+(``local_engine()``); it is never stored or user-selected. ``cloud``
+(OpenAI-compatible transcription with the user's key) is registered on
+ALL platforms and selected via the ``mode`` setting — it loads no
+model (a no-op acquire with no idle timer) and reads its config at
+call time. Lazy load on first transcription, idle auto-unload with gc,
+immediate unload on switch. One asyncio lock serializes lifecycle
+operations; a semaphore serializes transcriptions (acquire..release).
+Busy -> unload / switch are REJECTED, never deadlock. Engine imports
+happen only inside the concrete engine constructors (lazy), so this
+module imports cleanly on any platform.
 
 Stdlib + engines only; no framework imports.
 """
@@ -26,7 +30,7 @@ from typing import Any, Callable, Protocol
 
 from app import i18n
 
-ENGINE_NAMES = ("parakeet", "faster_whisper")
+ENGINE_NAMES = ("parakeet", "faster_whisper", "cloud")
 FALLBACK_ENGINE = "faster_whisper"
 PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
 FASTER_WHISPER_MODEL = "large-v3-turbo"
@@ -56,7 +60,7 @@ def _is_apple_silicon(
     return name == "darwin" and arch in ("arm64", "aarch64")
 
 
-def available_engines(
+def _local_engines(
     platform_name: str | None = None, machine: str | None = None
 ) -> tuple[str, ...]:
     """Local engines that can actually run on this machine.
@@ -65,8 +69,16 @@ def available_engines(
     faster-whisper, which is the universal CTranslate2 path.
     """
     if _is_apple_silicon(platform_name, machine):
-        return ENGINE_NAMES
+        return ("parakeet", FALLBACK_ENGINE)
     return (FALLBACK_ENGINE,)
+
+
+def available_engines(
+    platform_name: str | None = None, machine: str | None = None
+) -> tuple[str, ...]:
+    """Every engine selectable on this machine: the local tuple plus
+    ``cloud`` (an HTTP client runs everywhere)."""
+    return _local_engines(platform_name, machine) + ("cloud",)
 
 
 def local_engine(
@@ -132,7 +144,15 @@ class EngineManager:
             self._settings_fn = settings_fn
         if on_switch is not None:
             self._on_switch = on_switch
-        self._engine_name = None  # re-derive the engine from the platform
+        # Re-derive the engine: platform-local unless the effective mode
+        # says cloud (a stored cloud mode survives restarts).
+        self._engine_name = None
+        try:
+            settings = self._settings() or {}
+        except Exception:
+            settings = {}
+        if settings.get("engine") == "cloud" or settings.get("mode") == "cloud":
+            self._engine_name = "cloud"
 
     # ------------------------------------------------------------------ util
     def _settings(self) -> dict:
@@ -148,10 +168,14 @@ class EngineManager:
     def status(self) -> dict:
         name = self._current_name()
         s = self._settings()
+        if name == "cloud":
+            model = str(s.get("cloud_model") or "")
+        else:
+            model = ENGINE_MODELS.get(name, "")
         out: dict = {
             "state": self._state,
             "engine": name,
-            "model": ENGINE_MODELS.get(name, ""),
+            "model": model,
             "idle_unload_min": s.get("idle_unload_min", 10),
         }
         if self._last_used is not None:
@@ -167,7 +191,15 @@ class EngineManager:
         self._detail = None
         model = ENGINE_MODELS.get(engine_name, "")
         try:
-            engine = await asyncio.to_thread(self._factory, engine_name, model)
+            if engine_name == "cloud":
+                # No-op load: no model, no thread hop — the engine reads
+                # its config (base_url/model/key) from the settings at
+                # every transcribe() call.
+                from app.services.cloud_engine import CloudEngine
+
+                engine = CloudEngine(settings_fn=self._settings)
+            else:
+                engine = await asyncio.to_thread(self._factory, engine_name, model)
         except Exception as exc:
             self._engine = None
             self._loaded_name = None
@@ -201,6 +233,8 @@ class EngineManager:
 
     def _schedule_idle_timer(self) -> None:
         self._cancel_timer()
+        if self._current_name() == "cloud":
+            return  # nothing resident: cloud holds no model to unload
         try:
             idle_min = int(self._settings().get("idle_unload_min", 10) or 0)
         except (TypeError, ValueError):

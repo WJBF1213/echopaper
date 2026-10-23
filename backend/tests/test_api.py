@@ -707,13 +707,18 @@ def test_settings_put_engine_validated_but_never_stored(app, client, tmp_db):
     assert asr["idle_unload_min"] == 7
 
 
-def test_settings_asr_payload_is_engine_and_idle_only(client):
+def test_settings_asr_payload_shape(client):
     from app.services import engines as engines_mod
 
     asr = client.get("/api/settings").json()["asr"]
     assert asr == {
+        "mode": "local",
         "engine": engines_mod.local_engine(),
         "idle_unload_min": 10,
+        "cloud_base_url": "https://api.groq.com/openai/v1",
+        "cloud_model": "whisper-large-v3-turbo",
+        "has_cloud_key": False,
+        "cloud_key_masked": None,
     }
 
 
@@ -729,8 +734,13 @@ def test_settings_legacy_asr_row_ignores_unknown_subkeys(app, client, tmp_db):
     )
     asr = client.get("/api/settings").json()["asr"]
     assert asr == {
+        "mode": "local",
         "engine": engines_mod.local_engine(),
         "idle_unload_min": 3,
+        "cloud_base_url": "https://api.groq.com/openai/v1",
+        "cloud_model": "whisper-large-v3-turbo",
+        "has_cloud_key": False,
+        "cloud_key_masked": None,
     }
 
 

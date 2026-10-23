@@ -1,9 +1,14 @@
-"""Audio file storage helpers (Task B10).
+"""Audio file storage helpers (Task B10; cloud upload prep in Task 3).
 
 save_upload persists either uploaded bytes or a downloaded URL into
 ``data_dir/audio/`` and probes duration via ffprobe (None when ffprobe
 is missing or the probe fails — never blocks ingestion).
-Stdlib + httpx only.
+
+prepare_upload_audio fits an audio file under a cloud provider's upload
+size limit (24 MB): oversized files are recompressed to 16 kHz mono
+~48 kbps MP3 with PyAV (bundled codecs, no ffmpeg binary needed) and,
+when still oversized, split into ~10-minute chunks with their exact
+start offsets. Stdlib + httpx + PyAV (lazy) only.
 """
 from __future__ import annotations
 
@@ -11,8 +16,10 @@ import asyncio
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -20,6 +27,12 @@ from app import i18n
 
 DOWNLOAD_TIMEOUT_S = 120.0
 ALLOWED_EXTS = {".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".aac", ".webm"}
+
+#: provider upload limit handling (Task 3)
+UPLOAD_THRESHOLD_MB = 24.0
+CHUNK_SECONDS = 600.0  # ~3.6 MB at 48 kbps — far below any limit
+UPLOAD_SAMPLE_RATE = 16000
+UPLOAD_BITRATE = 48000
 
 
 class AudioError(Exception):
@@ -169,3 +182,119 @@ def _av_duration(path: str | Path) -> float | None:
     except Exception:
         return None
     return None
+
+
+# ------------------------------------------------- cloud upload prep (Task 3)
+
+
+def _upload_tmp_dir() -> Path:
+    tmp = Path(tempfile.gettempdir()) / "echopaper-upload"
+    tmp.mkdir(parents=True, exist_ok=True)
+    return tmp
+
+
+def _encode_frames(container, stream, frames) -> None:
+    for frame in frames:
+        for packet in stream.encode(frame):
+            container.mux(packet)
+
+
+def _recompress_mp3(
+    src: Path | str,
+    dst: Path,
+    *,
+    sample_rate: int = UPLOAD_SAMPLE_RATE,
+    bitrate: int = UPLOAD_BITRATE,
+) -> None:
+    """Whole-file re-encode to 16 kHz mono MP3 via PyAV."""
+    import av
+
+    resampler = av.AudioResampler(
+        format="s16", layout="mono", rate=sample_rate
+    )
+    in_c = av.open(str(src))
+    out_c = av.open(str(dst), "w")
+    try:
+        out_s = out_c.add_stream("mp3", rate=sample_rate)
+        out_s.layout = "mono"
+        out_s.bit_rate = bitrate
+        for frame in in_c.decode(audio=0):
+            _encode_frames(out_c, out_s, resampler.resample(frame))
+        for packet in out_s.encode(None):  # flush the encoder
+            out_c.mux(packet)
+    finally:
+        in_c.close()
+        out_c.close()
+
+
+def _split_mp3(
+    src: Path,
+    tmp_dir: Path,
+    chunk_seconds: float,
+    *,
+    sample_rate: int = UPLOAD_SAMPLE_RATE,
+    bitrate: int = UPLOAD_BITRATE,
+) -> list[tuple[str, float]]:
+    """Re-encode ``src`` (already 16 kHz mono MP3) into consecutive
+    ``chunk_seconds`` windows. Cuts land on exact sample counts, so each
+    offset is exactly ``index * chunk_seconds``."""
+    import av
+
+    window = int(chunk_seconds * sample_rate)
+    resampler = av.AudioResampler(
+        format="s16", layout="mono", rate=sample_rate
+    )
+    in_c = av.open(str(src))
+    outputs: list[tuple[Any, Any, Path, float]] = []
+    samples = 0
+    try:
+        for frame in in_c.decode(audio=0):
+            for resampled in resampler.resample(frame):
+                index = samples // window  # window the frame STARTS in
+                while len(outputs) <= index:
+                    path = tmp_dir / f"upload-{uuid.uuid4().hex}-{len(outputs)}.mp3"
+                    container = av.open(str(path), "w")
+                    stream = container.add_stream("mp3", rate=sample_rate)
+                    stream.layout = "mono"
+                    stream.bit_rate = bitrate
+                    outputs.append(
+                        (container, stream, path, len(outputs) * chunk_seconds)
+                    )
+                samples += resampled.samples
+                _encode_frames(outputs[index][0], outputs[index][1], [resampled])
+    finally:
+        for container, stream, _path, _off in outputs:
+            for packet in stream.encode(None):
+                container.mux(packet)
+            container.close()
+        in_c.close()
+    return [(str(path), offset) for _c, _s, path, offset in outputs]
+
+
+def prepare_upload_audio(
+    path: str | Path,
+    *,
+    threshold_mb: float = UPLOAD_THRESHOLD_MB,
+    chunk_seconds: float = CHUNK_SECONDS,
+) -> list[tuple[str, float]]:
+    """Fit audio under a provider upload limit (Task 3).
+
+    Returns ``[(file_path, offset_seconds)]`` for sequential upload:
+    ``[(original, 0.0)]`` when the file already fits; otherwise one
+    recompressed 16 kHz mono ~48 kbps MP3 (offset 0); if even that
+    exceeds the limit, ~``chunk_seconds`` chunks whose word times must
+    be offset by the chunk start. Files other than the original are
+    temporary — the CALLER deletes them after transcription.
+    """
+    src = Path(path)
+    limit = threshold_mb * 1024 * 1024
+    if src.stat().st_size <= limit:
+        return [(str(src), 0.0)]
+    tmp_dir = _upload_tmp_dir()
+    whole = tmp_dir / f"upload-{uuid.uuid4().hex}.mp3"
+    _recompress_mp3(src, whole)
+    if whole.stat().st_size <= limit:
+        return [(str(whole), 0.0)]
+    chunks = _split_mp3(whole, tmp_dir, chunk_seconds)
+    whole.unlink(missing_ok=True)
+    return chunks

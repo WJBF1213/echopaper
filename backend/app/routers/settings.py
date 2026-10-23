@@ -10,13 +10,21 @@ from app.config import load_settings
 from app.schemas import LlmTestIn, SettingsIn
 from app.services import engines as engines_mod
 from app.services import llm as llm_mod
+from app.services.engines import EngineError
 
 router = APIRouter()
 
 #: stored ``asr`` subkeys the readers honor. Legacy rows from the
 #: three-engine era may still carry ``engine`` / ``*_model`` subkeys;
 #: they are ignored, and a fresh PUT rewrites the row without them.
-_ASR_STORED_KEYS = ("idle_unload_min",)
+_ASR_STORED_KEYS = (
+    "mode",
+    "idle_unload_min",
+    "cloud_base_url",
+    "cloud_model",
+    "cloud_api_key",
+)
+ASR_MODES = ("local", "cloud")
 
 
 def effective_settings(conn) -> dict:
@@ -31,8 +39,12 @@ def effective_settings(conn) -> dict:
             "max_context_tokens": s.llm.max_context_tokens,
         },
         "asr": {
+            "mode": s.asr.mode,
             "engine": engines_mod.local_engine(),
             "idle_unload_min": s.asr.idle_unload_min,
+            "cloud_base_url": s.asr.cloud_base_url,
+            "cloud_model": s.asr.cloud_model,
+            "cloud_api_key": s.asr.cloud_api_key,
         },
     }
     stored = db.get_setting(conn, "llm")
@@ -43,6 +55,10 @@ def effective_settings(conn) -> dict:
         for key in _ASR_STORED_KEYS:
             if key in stored:
                 out["asr"][key] = stored[key]
+    # engine is derived, never stored: cloud when the mode says so,
+    # else the platform's one local engine
+    mode = out["asr"].get("mode") or "local"
+    out["asr"]["engine"] = "cloud" if mode == "cloud" else engines_mod.local_engine()
     out["llm"]["max_context_tokens"] = llm_mod.clamp_max_context(
         out["llm"].get("max_context_tokens")
     )
@@ -62,7 +78,11 @@ def _public(settings: dict) -> dict:
     key = llm.pop("api_key", "") or ""
     llm["has_key"] = bool(key)
     llm["key_masked"] = mask_key(key)
-    return {"llm": llm, "asr": settings["asr"]}
+    asr = dict(settings["asr"])
+    cloud_key = asr.pop("cloud_api_key", "") or ""
+    asr["has_cloud_key"] = bool(cloud_key)
+    asr["cloud_key_masked"] = mask_key(cloud_key)
+    return {"llm": llm, "asr": asr}
 
 
 def llm_cfg_or_none(settings: dict) -> dict | None:
@@ -96,6 +116,14 @@ async def put_settings(body: SettingsIn, request: Request):
         db.set_setting(conn, "llm", current["llm"])
     if body.asr is not None:
         patch = body.asr.model_dump(exclude_none=True)
+        mode = patch.pop("mode", None)
+        if mode is not None and mode not in ASR_MODES:
+            raise HTTPException(
+                status_code=400,
+                detail=i18n.t(
+                    "asr.invalid_mode", mode=mode, available=", ".join(ASR_MODES)
+                ),
+            )
         engine = patch.pop("engine", None)
         if engine and engine not in engines_mod.available_engines():
             raise HTTPException(
@@ -106,15 +134,32 @@ async def put_settings(body: SettingsIn, request: Request):
                     available=", ".join(engines_mod.available_engines()),
                 ),
             )
-        # The engine is always derived from the platform: an available value
-        # passes validation but is neither persisted nor switched.
+        if "cloud_api_key" in patch and not (patch["cloud_api_key"] or "").strip():
+            patch.pop("cloud_api_key")  # empty key keeps the stored one
         stored = db.get_setting(conn, "asr")
         base = (
             {k: stored[k] for k in _ASR_STORED_KEYS if k in stored}
             if isinstance(stored, dict)
             else {}
         )
-        db.set_setting(conn, "asr", {**base, **patch})
+        merged = {**base, **patch}
+        if mode is not None:
+            merged["mode"] = mode
+        # A mode change re-engines the manager BEFORE anything is
+        # persisted: a busy engine 409s and the stored mode stays as-is.
+        if mode is not None and mode != (current["asr"].get("mode") or "local"):
+            target = (
+                "cloud" if mode == "cloud" else engines_mod.local_engine()
+            )
+            try:
+                result = await request.app.state.engine_manager.switch(target)
+            except EngineError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if result.get("busy"):
+                raise HTTPException(
+                    status_code=409, detail=result.get("detail")
+                )
+        db.set_setting(conn, "asr", merged)
 
     return _public(effective_settings(conn))
 

@@ -57,8 +57,8 @@ def make_manager(settings=None, factory=None, sleep_fn=None):
 
 # ---------------- module surface: one engine+model per platform ----------------
 
-def test_engine_names_are_exactly_the_two_local_engines():
-    assert engines.ENGINE_NAMES == ("parakeet", "faster_whisper")
+def test_engine_names_are_local_engines_plus_cloud():
+    assert engines.ENGINE_NAMES == ("parakeet", "faster_whisper", "cloud")
     assert "whisper" not in engines.ENGINE_NAMES
 
 
@@ -75,7 +75,8 @@ def test_local_engine_and_availability_apple_silicon():
 
 @pytest.mark.real_platform
 def test_local_engine_and_availability_other_platforms():
-    # Intel Macs and every non-darwin platform only get CTranslate2.
+    # Intel Macs and every non-darwin platform only get CTranslate2
+    # locally — plus the cloud engine, which runs everywhere.
     for platform_name, machine in (
         ("darwin", "x86_64"),
         ("win32", "AMD64"),
@@ -83,6 +84,7 @@ def test_local_engine_and_availability_other_platforms():
     ):
         assert engines.available_engines(platform_name, machine) == (
             engines.FALLBACK_ENGINE,
+            "cloud",
         )
         assert engines.local_engine(platform_name, machine) == (
             engines.FALLBACK_ENGINE

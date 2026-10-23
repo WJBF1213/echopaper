@@ -24,10 +24,25 @@ class LlmTestIn(BaseModel):
 
 
 class AsrSettingsIn(BaseModel):
-    # Validated then ignored: the engine is always derived from the
-    # platform (services.engines.local_engine), never stored or switched.
+    # ``engine`` is legacy: validated then ignored (the engine is derived
+    # from mode + platform, never stored or switched on its own).
+    # ``mode`` selects local vs cloud; ``cloud_api_key`` is write-only
+    # (an empty string keeps the stored key, mirroring llm.api_key).
     engine: Optional[str] = None
+    mode: Optional[str] = None
     idle_unload_min: Optional[int] = None
+    cloud_base_url: Optional[str] = None
+    cloud_model: Optional[str] = None
+    cloud_api_key: Optional[str] = None
+
+
+class CloudAsrTestIn(BaseModel):
+    """Optional overrides for POST /api/asr/test-cloud: test exactly what
+    the settings form shows, before it is saved."""
+
+    cloud_base_url: Optional[str] = None
+    cloud_model: Optional[str] = None
+    cloud_api_key: Optional[str] = None  # blank keeps the stored key
 
 
 class SettingsIn(BaseModel):
