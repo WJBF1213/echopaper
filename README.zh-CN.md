@@ -5,12 +5,13 @@
 > 本文与英文 [README.md](README.md) 结构保持同步；若内容不一致，以英文版为准。
 
 EchoPaper 是一款本地优先的雅思风格听力练习应用（Windows / macOS）：导入听力音频 →
-本地语音识别（词级时间戳）→ 可选的 LLM 翻译 → 从转写生成整卷试卷（六种题型，
-含 LLM 重建并以 SVG 渲染的地图场景）→ 服务端判分 → 逐题正确率与错词本回顾 →
-中英双语精听。全部在本地运行；只有出卷与 LLM 翻译需要 API key。
+语音识别（词级时间戳，默认本地、可选云端）→ 可选的 LLM 翻译 → 从转写生成整卷
+试卷（六种题型，含 LLM 重建并以 SVG 渲染的地图场景）→ 服务端判分 → 逐题正确率
+与错词本回顾 → 中英双语精听。全部在本地运行；只有出卷、LLM 翻译与（可选的）
+云端识别需要 API key。
 
 ```
-上传音频 ──► 本地 ASR（词级时间戳）──► 可选 LLM 翻译
+上传音频 ──► ASR：本地或云端（词级时间戳）──► 可选 LLM 翻译
                                             │
         精听 ◄── 回顾 ◄── 服务端判分 ◄── 整卷生成（六种题型）
 ```
@@ -20,13 +21,14 @@ EchoPaper 是一款本地优先的雅思风格听力练习应用（Windows / mac
 
 ## 功能
 
-- **三种本地识别引擎，统一接口**
-  - `parakeet` — 通过 `parakeet-mlx` 运行 NVIDIA Parakeet TDT（Apple Silicon）
-  - `whisper` — 通过 `mlx-whisper` 运行 Whisper large-v3-turbo（Apple Silicon）
-  - `faster_whisper` — CTranslate2（Windows/Linux 有 CUDA 时用 GPU，否则 CPU）；
-    Apple Silicon 之外的平台默认使用
-  三种引擎都输出词级时间戳。模型在首次转写时按需加载，空闲后自动卸载（也可手动
-  卸载），约释放 1.2–2 GB 内存。
+- **本地与云端识别，均为词级时间戳**
+  - 本地模式（默认）：每个平台一个固定引擎 —— `parakeet`（MLX/Metal，Apple
+    Silicon）或 `faster_whisper` + `large-v3-turbo`（CTranslate2；有 CUDA 用
+    GPU，否则 CPU）。首次转写约下载 1.5 GB 模型；模型按需加载，空闲后自动卸载
+    （也可手动卸载）以释放内存。
+  - 云端模式：任意 OpenAI 兼容转写接口 —— Groq 预设（默认）、OpenAI 预设或
+    自定义接口地址 + 模型 —— 词级时间戳、无需下载本地模型。音频会上传到服务
+    商；隐私与费用见[语音识别](#语音识别)。
 - **整卷生成**：在材料页勾选题型与数量——单选、多选（选两项）、匹配、填空
   （表单/表格/笔记/句子/摘要/流程图版式）、简答、地图标注——由 LLM 一次性写出一
   份完整试卷。代码是最终裁判：答案与证据必须是转写原文的逐字段跨度；原文撑不起的
@@ -57,9 +59,11 @@ EchoPaper 是一款本地优先的雅思风格听力练习应用（Windows / mac
   （difflib 词级对齐，插入词插值）。事后编辑转写会重新锚定，并把旧试卷标记为
   stale 保留历史，而不是删除。
 - **中英双语界面**：内置中文和英文，顶栏可切换语言，支持浏览器语言检测；后端消息
-  按请求的 `Accept-Language` 本地化。参见[添加语言](#添加语言)。
-- **密钥只写不读**：LLM 密钥保存在本地 SQLite，API 只返回是否已配置和掩码提示，
-  也可通过 `.env` 预置。
+  按请求的 `Accept-Language` 本地化。界面上可见的选音频按钮是应用自己的已翻译
+  控件；随后弹出的系统文件选择框语言由 OS/浏览器决定。参见
+  [添加语言](#添加语言)。
+- **密钥只写不读**：LLM 与云端识别密钥保存在本地 SQLite，API 只返回是否已配置
+  和掩码提示，也可通过 `.env` 预置。
 
 没有 LLM key 时应用仍可导入、识别、对齐、回放材料；生成试卷需要 key（exam 接口
 会返回 `400` 并附提示）。
@@ -69,12 +73,15 @@ EchoPaper 是一款本地优先的雅思风格听力练习应用（Windows / mac
 Windows 与 macOS 为受支持平台。Intel Mac 和 Linux 可运行应用，并使用
 `faster_whisper` 的 CPU 回退进行本地识别（Linux 启动器在[路线图](#路线图)中）。
 
-| 平台 | 可用 ASR 引擎 | 说明 |
+| 平台 | 本地引擎（按平台固定） | 说明 |
 |---|---|---|
-| Apple Silicon Mac（M1/M2/M3/M4） | `parakeet`（默认）、`whisper`、`faster_whisper` | parakeet/whisper 使用 MLX/Metal |
+| Apple Silicon Mac（M1/M2/M3/M4） | `parakeet`（MLX/Metal） | |
 | Windows 10/11 | `faster_whisper` | 有 CUDA 用 GPU，否则 CPU |
 | Linux | `faster_whisper` | 有 CUDA 用 GPU，否则 CPU |
 | Intel Mac | `faster_whisper` | CPU 回退 |
+
+本地引擎由平台决定，无需选择。云端识别（HTTP 客户端）在所有平台可用；见
+[语音识别](#语音识别)。
 
 通用要求：
 
@@ -93,7 +100,7 @@ Windows 与 macOS 为受支持平台。Intel Mac 和 Linux 可运行应用，并
 ### macOS
 
 双击 **`start-macos.command`**。首次运行会自动：创建 `.venv`、安装依赖（含
-`mlx-whisper` / `parakeet-mlx`）、尝试安装 spaCy 英文模型、写入默认 `.env`、
+`parakeet-mlx`）、尝试安装 spaCy 英文模型、写入默认 `.env`、
 启动服务并打开 <http://127.0.0.1:8300>。双击 **`stop-macos.command`** 停止服务，
 识别模型与内存立即释放。
 
@@ -102,11 +109,12 @@ Windows 与 macOS 为受支持平台。Intel Mac 和 Linux 可运行应用，并
 
 ### 首次运行说明
 
-- **首次转写会下载 ASR 模型**（约 1.2–1.6 GB，见[模型与下载](#模型与下载)）。
+- **首次本地转写会下载 ASR 模型**（约 1.5 GB，见[语音识别](#语音识别)）。
   进度显示在任务栏；请保持启动窗口开启。
 - 两个平台的启动脚本默认使用清华 PyPI 镜像安装依赖，并使用
   `HF_ENDPOINT=https://hf-mirror.com` 下载模型。
-- **LLM key 可稍后配置**：出卷与 LLM 翻译需要；本地识别无需 key。
+- **key 可稍后配置**：LLM key 供出卷与 LLM 翻译使用；本地识别无需任何 key，
+  云端识别仅在切换到该模式时才需要自己的 key。
 
 ## 手动安装
 
@@ -145,10 +153,9 @@ npm run build      # vue-tsc --noEmit && vite build -> frontend/dist
 
 平台说明：
 
-- `mlx-whisper` 与 `parakeet-mlx` 带 `sys_platform == "darwin"` 环境标记，
-  Windows/Linux 会自动跳过。引擎模块延迟导入依赖，因此测试和 API 可在任意平台
-  运行。
-- Intel Mac 无法使用 MLX 包。若 pip 无法解析它们，可显式安装其余运行时依赖：
+- `parakeet-mlx` 带 `sys_platform == "darwin"` 环境标记，Windows/Linux 会自动
+  跳过。引擎模块延迟导入依赖，因此测试和 API 可在任意平台运行。
+- Intel Mac 无法使用 MLX 包。若 pip 无法解析它，可显式安装其余运行时依赖：
   `pip install fastapi uvicorn httpx python-multipart spacy faster-whisper`，
   然后使用 `faster_whisper` 引擎。
 - Windows：可用 `winget install Gyan.FFmpeg` 或从
@@ -168,19 +175,19 @@ npm run build      # vue-tsc --noEmit && vite build -> frontend/dist
 | `HF_HOME` | `<repo>/.models` | Hugging Face 模型缓存 |
 | `HF_ENDPOINT` | `https://hf-mirror.com` | 模型下载镜像 |
 | `PIP_INDEX_URL` | 清华镜像 | 注入给 pip 子进程 |
-| `ASR_ENGINE` | Apple Silicon 为 `parakeet`，其他平台为 `faster_whisper` | 当前引擎 |
-| `ASR_PARAKEET_MODEL` | `mlx-community/parakeet-tdt-0.6b-v3` | Parakeet 模型 |
-| `ASR_WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` | MLX Whisper 模型 |
-| `ASR_FASTER_WHISPER_MODEL` | `large-v3-turbo` | CTranslate2 模型（别名：`FASTER_WHISPER_MODEL`） |
-| `ASR_IDLE_UNLOAD_MIN` | `10` | 空闲多少分钟后卸载模型（`0`=常驻） |
+| `ASR_MODE` | `local` | 识别模式：`local`（默认）或 `cloud` |
+| `ASR_CLOUD_BASE_URL` | `https://api.groq.com/openai/v1` | 云端接口地址（OpenAI 兼容） |
+| `ASR_CLOUD_MODEL` | `whisper-large-v3-turbo` | 云端模型名 |
+| `ASR_CLOUD_API_KEY` | 空 | 可选的云端密钥预置；通常直接在设置页填写 |
+| `ASR_IDLE_UNLOAD_MIN` | `10` | 空闲多少分钟后卸载本地模型（`0`=常驻） |
 | `LLM_PROVIDER` | `zhipu` | `zhipu`、`dashscope`、`deepseek` 或 `custom` |
 | `LLM_BASE_URL` | 服务商预设 | OpenAI 兼容接口地址 |
 | `LLM_MODEL` | 服务商预设 | 模型名 |
 | `LLM_API_KEY` | 空 | 可选的密钥预置；通常直接在设置页填写 |
 | `LLM_MAX_CONTEXT_TOKENS` | `262144` | 可调低，但绝不允许超过 256k |
 
-若在非 Apple Silicon 机器上的 `.env` 指定了 MLX 引擎，运行时会自动回退到
-`faster_whisper`，而不是让每个任务失败。
+本地引擎与模型按平台固定，没有对应的环境变量。云端各项通常在设置页配置；见
+[语音识别](#语音识别)。
 
 ### LLM 服务商与缓存
 
@@ -215,22 +222,51 @@ temperature 0，服务商可复用前缀缓存；同时每个 JSON 响应额外�
 > 从 0.1.0 之前的实验版升级、且自定义过 **地图标注规则** 提示词？请在
 > 设置 → 提示词 中重置一次该覆盖——v0.1.0 新增了旧覆盖里没有的空位编号规则。
 
-## 模型与下载
+## 语音识别
 
-- 模型权重缓存在 `HF_HOME`（默认 `.models/`）。下载经过 `HF_ENDPOINT`
-  （默认 `hf-mirror.com`）；首次下载完成后可离线使用。
-- Apple Silicon 上，`parakeet`（`mlx-community/parakeet-tdt-0.6b-v3`）和
-  `whisper`（`mlx-community/whisper-large-v3-turbo`）首次转写时约下载
-  1.2–1.6 GB。
-- `faster_whisper` 使用 CTranslate2 的 `large-v3-turbo` 模型 —— 与 MLX 引擎同一份
-  Whisper 权重，只是转换为 CTranslate2 格式。CUDA 下以 `float16` 运行，CPU 下以
-  `int8` 运行；CUDA 运行库缺失时会自动回退 CPU，而不是让转写任务失败。
+识别在两种模式中选择，可在设置页（设置 → 语音识别）或通过 `ASR_MODE` 切换。
+两种模式都输出**词级时间戳**——可点击转写、逐词回放与证据锚定题目都依赖它。
+
+### 本地（默认，离线）
+
+每个平台一个固定引擎 + 模型，无需选择：
+
+| 平台 | 引擎 | 模型 |
+|---|---|---|
+| Apple Silicon Mac | `parakeet`（MLX/Metal） | `mlx-community/parakeet-tdt-0.6b-v3` |
+| Windows / Linux / Intel Mac | `faster_whisper`（CTranslate2） | `large-v3-turbo` |
+
+- **首次转写会下载模型（约 1.5 GB）**；之后可完全离线使用。权重缓存在
+  `HF_HOME`（默认 `.models/`），下载经 `HF_ENDPOINT`（默认 `hf-mirror.com`）。
+- `faster_whisper` 在 CUDA 下以 `float16` 运行，CPU 下以 `int8` 运行；CUDA
+  运行库缺失时自动回退 CPU，而不是让转写失败。
 - **Hugging Face 访问不了？** `app/services/model_download.py` 会先探测 HF，在
   `huggingface.co` / `hf-mirror.com` 超时时自动改用 ModelScope 上相同的
-  CTranslate2 文件。也可以把模型设置填成本地目录（包含 `config.json`、
-  `model.bin`、`tokenizer.json`、`vocabulary.json`），实现完全离线使用。
-- 在设置页切换引擎会立即卸载当前模型。空闲卸载（`ASR_IDLE_UNLOAD_MIN`，默认
-  10 分钟）会自动释放内存；`POST /api/asr/unload` 可立即卸载。
+  CTranslate2 文件。完全离线使用时，把 `config.json`、`model.bin`、
+  `tokenizer.json`、`vocabulary.json` 放入 `.models/faster-whisper/large-v3-turbo/`。
+- 本地模型首次使用时按需加载，空闲 `ASR_IDLE_UNLOAD_MIN` 分钟（默认 10，
+  `0`=常驻）后自动卸载；`POST /api/asr/unload` 立即卸载；切换模式会立刻卸载
+  本地模型。
+
+### 云端（音频会离开本机）
+
+云端模式把音频发给任意 **OpenAI 兼容** 的 `/audio/transcriptions` 接口，无需
+本地模型或下载。在设置页配置接口地址、模型与 API key，内置预设：
+
+| 服务商 | 接口地址 | 默认模型 | 大致费用 |
+|---|---|---|---|
+| Groq（默认） | `https://api.groq.com/openai/v1` | `whisper-large-v3-turbo` | ≈ $0.04/小时 —— 30 分钟雅思磁带 ≈ $0.02 |
+| OpenAI | `https://api.openai.com/v1` | `whisper-1` | ≈ $0.36/小时 —— 30 分钟 ≈ $0.18 |
+| 自定义 | 任意 OpenAI 兼容地址 | 自定义 | 视服务商而定 |
+
+- **隐私**：云端模式下**音频文件会上传到你所配置的服务商**（连同你的 API
+  key）。除此之外没有任何数据离开本机；本地模式不上传任何内容。
+- 词级时间戳来自服务商的 `verbose_json` 响应；个别服务商缺少词级时间时，按
+  句段时间均匀铺开，词级功能仍然可用。
+- 服务商限制上传大小（约 24 MB）：超限文件自动重压缩为 16 kHz 单声道 MP3 并
+  切成约 10 分钟的分块，分块时间戳按偏移拼接还原。
+- 云端密钥与 LLM 密钥一样只写不读（设置页只显示掩码提示），**测试连接** 按钮
+  可在正式使用前验证接口。
 
 ## 添加语言
 
@@ -249,11 +285,12 @@ temperature 0，服务商可复用前缀缓存；同时每个 JSON 响应额外�
 
 ## API 快览
 
-交互式文档 `/docs` 为准。v0.1.0 接口面：
+交互式文档 `/docs` 为准。v0.2.0 接口面：
 
 ```
 GET  /api/health                      健康检查 + 应用版本
 GET  /api/asr/status | POST /api/asr/load | POST /api/asr/unload
+POST /api/asr/test-cloud              测试云端识别接口连通性
 GET|PUT /api/settings                 LLM/ASR 配置（密钥只写不读）
 POST /api/settings/test-llm           用表单当前值测试 LLM 连通性
 GET|PUT /api/prompts                  提示词注册表 / 保存或重置一条
@@ -291,7 +328,7 @@ POST /api/translate                   英译中（带缓存与多级兜底）
 安装完成后确认：
 
 1. 启动脚本启动服务并打开 <http://127.0.0.1:8300>；`GET /api/health` 返回
-   `{"ok": true, "version": "0.1.0"}`。
+   `{"ok": true, "version": "0.2.0"}`。
 2. `GET /api/asr/status` 返回 `unloaded`，空闲时内存占用较低。
 3. 导入一个音频：任务依次进入 `transcribing` →（`translating`）→ `done`（首次会
    下载模型），材料的 `words` 带 `s`/`e` 时间戳。

@@ -15,7 +15,7 @@ if ! command -v $PY >/dev/null 2>&1; then
   read -r -p "Press Enter to close..." _; exit 1
 fi
 
-# 2) 首次建 venv + 装依赖（清华 PyPI 镜像；macOS 会自动多装 mlx-whisper / parakeet-mlx）
+# 2) 首次建 venv + 装依赖（清华 PyPI 镜像；macOS 会自动多装 parakeet-mlx）
 if [ ! -x "$VENV/bin/python" ]; then
   echo "[SETUP] First run: creating the virtual environment and installing dependencies (about 2-5 minutes)..."
   $PY -m venv "$VENV" || { echo "[ERROR] Failed to create $VENV"; exit 1; }
@@ -43,13 +43,8 @@ fi
 # 5) 默认 .env（已存在则不动）
 if [ ! -f .env ]; then
   cat > .env <<'EOF'
-# HuggingFace 模型下载镜像（国内加速，首次识别时下载 ~1.2-1.6GB）
+# HuggingFace 模型下载镜像（国内加速，首次识别时下载 ~1.5GB）
 HF_ENDPOINT=https://hf-mirror.com
-# ASR 引擎：parakeet（默认，更快更准）或 whisper，可在应用设置页随时切换
-ASR_ENGINE=parakeet
-ASR_PARAKEET_MODEL=mlx-community/parakeet-tdt-0.6b-v3
-ASR_WHISPER_MODEL=mlx-community/whisper-large-v3-turbo
-ASR_FASTER_WHISPER_MODEL=large-v3-turbo
 # 空闲多少分钟自动卸载识别模型释放内存（0=常驻）
 ASR_IDLE_UNLOAD_MIN=10
 EOF

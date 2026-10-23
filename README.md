@@ -3,16 +3,17 @@
 English | [中文](README.zh-CN.md)
 
 EchoPaper is a local-first IELTS-style listening practice app for Windows and
-macOS: import listening audio, transcribe it locally with word-level
-timestamps, optionally translate it with an LLM, generate a full exam paper
-from the transcript (six question types, including LLM-reconstructed map
-scenes rendered as SVG), grade it on the server, review per-item accuracy and
-a wrong-word book, and drill sentences in a bilingual intensive-listening
-view. Everything runs on your machine; an LLM API key is only needed for
-paper generation and LLM translation.
+macOS: import listening audio, transcribe it with word-level timestamps
+(locally by default, or through a cloud provider), optionally translate it
+with an LLM, generate a full exam paper from the transcript (six question
+types, including LLM-reconstructed map scenes rendered as SVG), grade it on
+the server, review per-item accuracy and a wrong-word book, and drill
+sentences in a bilingual intensive-listening view. Everything runs on your
+machine; API keys are only needed for paper generation, LLM translation,
+and (optional) cloud transcription.
 
 ```
-audio upload ──► local ASR (word timestamps) ──► optional LLM translation
+audio upload ──► ASR: local or cloud (word timestamps) ──► optional LLM translation
                                                         │
               intensive listening ◄── review ◄── grading ◄── full-paper generation (six types)
 ```
@@ -24,14 +25,18 @@ Git — running from source requires one `npm run build`
 
 ## Features
 
-- **Three local ASR engines, one interface**
-  - `parakeet` — NVIDIA Parakeet TDT via `parakeet-mlx` (Apple Silicon)
-  - `whisper` — Whisper large-v3-turbo via `mlx-whisper` (Apple Silicon)
-  - `faster_whisper` — CTranslate2 (CUDA on Windows/Linux when available, CPU
-    otherwise); the default outside Apple Silicon
-  All engines produce word-level timestamps. The active model is loaded lazily on
-  the first transcription and unloaded after an idle period (or manually), which
-  frees roughly 1.2–2 GB of memory.
+- **Local and cloud transcription, word-level timestamps either way**
+  - Local mode (default): one fixed engine per platform — `parakeet`
+    (MLX/Metal, Apple Silicon) or `faster_whisper` with `large-v3-turbo`
+    (CTranslate2; CUDA when available, CPU otherwise). The first
+    transcription downloads roughly 1.5 GB of model weights; the model loads
+    lazily and is unloaded after an idle period (or manually), freeing
+    memory.
+  - Cloud mode: any OpenAI-compatible transcription endpoint — Groq preset
+    (default), OpenAI preset, or a custom base URL + model — with word-level
+    timestamps and no local model download. Audio is uploaded to the
+    provider; see [Transcription](#transcription) for the privacy note and
+    rough costs.
 - **Full-paper generation.** Pick question types and counts on the material
   page — multiple choice (single / two answers), matching, completion (with
   form/table/notes/sentence/summary/flow-chart layouts), short answer, and map
@@ -77,10 +82,12 @@ Git — running from source requires one `npm run build`
   marks old papers stale instead of deleting history.
 - **Bilingual UI.** Chinese and English are built in, with a header language
   selector, browser-language detection, and per-request `Accept-Language` for
-  backend messages. See [Adding a language](#adding-a-language).
-- **Write-only API keys.** LLM keys are stored in the local SQLite database and
-  never returned by the API (only a masked hint). They can optionally be seeded
-  from `.env`.
+  backend messages. The visible audio-pick buttons are the app's own
+  translated controls; the native file-open dialog itself follows your
+  OS/browser language. See [Adding a language](#adding-a-language).
+- **Write-only API keys.** LLM and cloud-transcription keys are stored in the
+  local SQLite database and never returned by the API (only a masked hint).
+  They can optionally be seeded from `.env`.
 
 Without an LLM key the app still imports, transcribes, aligns, and replays
 material; paper generation needs a key (the exam endpoint answers `400` with a
@@ -89,15 +96,19 @@ hint).
 ## Platform support
 
 Windows and macOS are the supported platforms. Intel Macs and Linux can run
-the app and use the `faster_whisper` CPU fallback for local recognition
+the app and use the `faster_whisper` CPU path for local recognition
 (a Linux launcher is on the [roadmap](#roadmap)).
 
-| Platform | Available ASR engines | Notes |
+| Platform | Local engine (fixed per platform) | Notes |
 |---|---|---|
-| macOS on Apple Silicon (M1/M2/M3/M4) | `parakeet` (default), `whisper`, `faster_whisper` | MLX/Metal for parakeet/whisper |
+| macOS on Apple Silicon (M1/M2/M3/M4) | `parakeet` (MLX/Metal) | |
 | Windows 10/11 | `faster_whisper` | CUDA when available, CPU otherwise |
 | Linux | `faster_whisper` | CUDA when available, CPU otherwise |
 | Intel Mac | `faster_whisper` | CPU fallback |
+
+The local engine is derived from the platform — there is nothing to choose.
+Cloud transcription (an HTTP client) is available on every platform; see
+[Transcription](#transcription).
 
 Common requirements:
 
@@ -118,7 +129,7 @@ environment, installs dependencies, sets up the spaCy model, writes a default
 ### macOS
 
 Double-click **`start-macos.command`**. On the first run it creates `.venv`,
-installs dependencies (including `mlx-whisper` / `parakeet-mlx`), tries to
+installs dependencies (including `parakeet-mlx`), tries to
 install the spaCy English model, writes a default `.env`, starts the server, and
 opens <http://127.0.0.1:8300>. Double-click **`stop-macos.command`** to stop
 the server; all model memory is released immediately.
@@ -128,13 +139,15 @@ If macOS blocks the script, right-click it and choose **Open**, or run
 
 ### First run notes
 
-- The **first transcription downloads the ASR model** (roughly 1.2–1.6 GB;
-  see [Models and downloads](#models-and-downloads)). Progress shows in the
+- The **first local transcription downloads the ASR model** (roughly 1.5 GB;
+  see [Transcription](#transcription)). Progress shows in the
   task bar; keep the launcher window open.
 - Both launchers install from the Tsinghua PyPI mirror and use
   `HF_ENDPOINT=https://hf-mirror.com` for model downloads by default.
-- The **LLM key is optional at start**: configure it later in Settings
-  (needed for paper generation and LLM translation; ASR works without).
+- **Keys are optional at start**: configure the LLM key later in Settings
+  (needed for paper generation and LLM translation); local transcription
+  works without any key, and cloud transcription needs its own key only if
+  you switch to that mode.
 
 ## Manual setup
 
@@ -174,10 +187,10 @@ npm run build      # vue-tsc --noEmit && vite build -> frontend/dist
 
 Platform notes:
 
-- `mlx-whisper` and `parakeet-mlx` are marked `sys_platform == "darwin"`, so they
-  are skipped on Windows/Linux. Engine modules import their dependencies lazily,
-  so tests and the API work on any platform.
-- On an Intel Mac the MLX packages are unusable. If pip cannot resolve them,
+- `parakeet-mlx` is marked `sys_platform == "darwin"`, so it is skipped on
+  Windows/Linux. Engine modules import their dependencies lazily, so tests
+  and the API work on any platform.
+- On an Intel Mac the MLX package is unusable. If pip cannot resolve it,
   install the remaining runtime dependencies explicitly:
   `pip install fastapi uvicorn httpx python-multipart spacy faster-whisper`,
   then run with the `faster_whisper` engine.
@@ -199,20 +212,20 @@ file defaults for those sections.
 | `HF_HOME` | `<repo>/.models` | Hugging Face model cache |
 | `HF_ENDPOINT` | `https://hf-mirror.com` | Model download mirror |
 | `PIP_INDEX_URL` | Tsinghua mirror | Injected for pip subprocesses |
-| `ASR_ENGINE` | `parakeet` on Apple Silicon, `faster_whisper` elsewhere | Active engine |
-| `ASR_PARAKEET_MODEL` | `mlx-community/parakeet-tdt-0.6b-v3` | Parakeet model |
-| `ASR_WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` | MLX Whisper model |
-| `ASR_FASTER_WHISPER_MODEL` | `large-v3-turbo` | CTranslate2 model (alias: `FASTER_WHISPER_MODEL`) |
-| `ASR_IDLE_UNLOAD_MIN` | `10` | Idle minutes before unloading the model (`0` = keep loaded) |
+| `ASR_MODE` | `local` | Transcription mode: `local` (default) or `cloud` |
+| `ASR_CLOUD_BASE_URL` | `https://api.groq.com/openai/v1` | Cloud endpoint (OpenAI-compatible) |
+| `ASR_CLOUD_MODEL` | `whisper-large-v3-turbo` | Cloud model name |
+| `ASR_CLOUD_API_KEY` | empty | Optional cloud key seed; the Settings page is the normal path |
+| `ASR_IDLE_UNLOAD_MIN` | `10` | Idle minutes before unloading the local model (`0` = keep loaded) |
 | `LLM_PROVIDER` | `zhipu` | `zhipu`, `dashscope`, `deepseek`, or `custom` |
 | `LLM_BASE_URL` | provider preset | OpenAI-compatible base URL |
 | `LLM_MODEL` | provider preset | Model name |
 | `LLM_API_KEY` | empty | Optional key seed; the Settings page is the normal path |
 | `LLM_MAX_CONTEXT_TOKENS` | `262144` | May be lowered, never raised above 256k |
 
-A `.env` naming an MLX engine on a non-Apple-Silicon machine is detected at
-runtime and automatically falls back to `faster_whisper` instead of failing every
-job.
+The local engine and model are fixed per platform — there is no env key for
+them. The cloud values are normally configured in Settings; see
+[Transcription](#transcription).
 
 ### LLM providers and caching
 
@@ -255,26 +268,62 @@ that drops a required one.
 > Prompts — v0.1.0 added a required blank-slot numbering rule that old
 > overrides do not contain.
 
-## Models and downloads
+## Transcription
 
-- Model weights are cached under `HF_HOME` (default `.models/`). Downloads go
-  through `HF_ENDPOINT` (default `hf-mirror.com`); after the first download the
-  app works offline.
-- `parakeet` (`mlx-community/parakeet-tdt-0.6b-v3`) and `whisper`
-  (`mlx-community/whisper-large-v3-turbo`) download roughly 1.2–1.6 GB on first
-  transcription on Apple Silicon.
-- `faster_whisper` uses the CTranslate2 `large-v3-turbo` model — the same Whisper
-  weights as the MLX engine, converted for CTranslate2. It runs in `float16` on
-  CUDA and `int8` on CPU; a missing CUDA runtime falls back to CPU automatically
-  instead of failing the transcription.
-- **Hugging Face unreachable?** `app/services/model_download.py` probes HF first
-  and falls back to the ModelScope mirror of the same CTranslate2 files when
-  `huggingface.co` / `hf-mirror.com` time out. You can also point the model
-  setting at a local directory containing `config.json`, `model.bin`,
-  `tokenizer.json`, and `vocabulary.json` for fully offline use.
-- Switching engines in Settings unloads the current model immediately. Idle
-  unload (`ASR_IDLE_UNLOAD_MIN`, default 10 minutes) frees memory automatically;
-  `POST /api/asr/unload` unloads immediately.
+Transcription runs in one of two modes, chosen in Settings
+(设置 → 语音识别) or via `ASR_MODE`. Both produce **word-level
+timestamps** — the basis for clickable transcripts, per-word replay, and
+evidence-anchored questions.
+
+### Local (default, offline)
+
+One engine + model is fixed per platform — there is nothing to choose:
+
+| Platform | Engine | Model |
+|---|---|---|
+| macOS on Apple Silicon | `parakeet` (MLX/Metal) | `mlx-community/parakeet-tdt-0.6b-v3` |
+| Windows / Linux / Intel Mac | `faster_whisper` (CTranslate2) | `large-v3-turbo` |
+
+- The **first transcription downloads the model (roughly 1.5 GB)**; after
+  that the app works offline. Weights are cached under `HF_HOME` (default
+  `.models/`) and fetched through `HF_ENDPOINT` (default `hf-mirror.com`).
+- `faster_whisper` runs `float16` on CUDA and `int8` on CPU; a missing CUDA
+  runtime falls back to CPU automatically instead of failing the
+  transcription.
+- **Hugging Face unreachable?** `app/services/model_download.py` probes HF
+  first and falls back to the ModelScope mirror of the same CTranslate2
+  files when `huggingface.co` / `hf-mirror.com` time out. For fully offline
+  use, place `config.json`, `model.bin`, `tokenizer.json`, and
+  `vocabulary.json` in `.models/faster-whisper/large-v3-turbo/`.
+- The local model loads lazily on first use and unloads after
+  `ASR_IDLE_UNLOAD_MIN` idle minutes (default 10, `0` = keep loaded);
+  `POST /api/asr/unload` unloads immediately, and switching modes unloads
+  the local model right away.
+
+### Cloud (audio leaves your machine)
+
+Cloud mode sends your audio to any **OpenAI-compatible**
+`/audio/transcriptions` endpoint and needs no local model or download.
+Configure base URL, model, and API key in Settings — presets included:
+
+| Provider | Base URL | Default model | Rough cost |
+|---|---|---|---|
+| Groq (default) | `https://api.groq.com/openai/v1` | `whisper-large-v3-turbo` | ≈ $0.04/h — a 30-min IELTS tape ≈ $0.02 |
+| OpenAI | `https://api.openai.com/v1` | `whisper-1` | ≈ $0.36/h — a 30-min tape ≈ $0.18 |
+| Custom | any OpenAI-compatible URL | your model | provider-dependent |
+
+- **Privacy:** in cloud mode **the audio file is uploaded to the provider
+  you configure** (along with your API key). Nothing else leaves the
+  machine, and local mode uploads nothing.
+- Word timestamps come from the provider's `verbose_json` response; when a
+  provider omits per-word timing, segment times are spread evenly so the
+  word-anchored features keep working.
+- Providers cap uploads (~24 MB): larger files are automatically
+  recompressed to 16 kHz mono MP3 and split into ~10-minute chunks, and
+  chunk timestamps are stitched back with the correct offsets.
+- The cloud key is write-only like the LLM key (Settings shows only a
+  masked hint), and **Test connection** checks the endpoint before you
+  rely on it.
 
 ## Adding a language
 
@@ -296,11 +345,12 @@ catalogs.
 
 ## API overview
 
-The interactive docs at `/docs` are authoritative. The v0.1.0 surface:
+The interactive docs at `/docs` are authoritative. The v0.2.0 surface:
 
 ```
 GET  /api/health                      Health check + app version
 GET  /api/asr/status | POST /api/asr/load | POST /api/asr/unload
+POST /api/asr/test-cloud              Probe the cloud ASR endpoint
 GET|PUT /api/settings                 LLM/ASR settings (key write-only)
 POST /api/settings/test-llm           Probe the LLM with the form's values
 GET|PUT /api/prompts                  List prompt registry / save or reset one
@@ -338,7 +388,7 @@ POST /api/translate                   Sentence EN -> ZH (cache + fallbacks)
 After installation, confirm:
 
 1. The launcher starts the server and opens <http://127.0.0.1:8300>;
-   `GET /api/health` returns `{"ok": true, "version": "0.1.0"}`.
+   `GET /api/health` returns `{"ok": true, "version": "0.2.0"}`.
 2. `GET /api/asr/status` reports `unloaded`; idle memory stays low.
 3. Import an audio file: the job moves through `transcribing` →
    (`translating`) → `done` (the first run downloads the model), and the
