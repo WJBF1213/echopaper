@@ -254,3 +254,34 @@ def test_settings_roundtrip(tmp_db):
     assert db.get_setting(tmp_db, "asr") == {"engine": "parakeet"}
     db.set_setting(tmp_db, "gen", 15)
     assert db.get_setting(tmp_db, "gen") == 15
+
+
+def test_get_setting_concurrent_same_sql_no_errors(tmp_path):
+    # The settings-500 bug: concurrent identical-SQL reads on one shared
+    # connection corrupt the cached statement. 8 threads x 500 iterations.
+    import threading
+
+    from app import db as db_mod
+
+    conn = db_mod.connect(tmp_path / "stress.db")
+    try:
+        db_mod.init_db(conn)
+        db_mod.set_setting(conn, "llm", {"provider": "zhipu"})
+        errors: list[Exception] = []
+
+        def hammer():
+            for _ in range(500):
+                try:
+                    value = db_mod.get_setting(conn, "llm")
+                    assert value is not None
+                except Exception as exc:  # noqa: BLE001 - collect every failure kind
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=hammer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+    finally:
+        conn.close()

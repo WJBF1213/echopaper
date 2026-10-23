@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -132,13 +133,124 @@ CREATE INDEX IF NOT EXISTS idx_paper_attempt_items_attempt ON paper_attempt_item
 """
 
 
-# Writes are serialised process-wide: FastAPI handlers run in a threadpool
-# and share this module's connection, so a module-level RLock is enough.
+# ALL access to the shared connection is serialised process-wide: FastAPI
+# handlers run in a threadpool and share one connection opened with
+# check_same_thread=False, and CPython's per-connection statement cache
+# corrupts under interleaved bind/step/fetch of the same SQL (the
+# intermittent settings-500 bug), so even reads must take this lock.
 _write_lock = threading.RLock()
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
-    """Open the database: WAL journal, foreign keys on, Row rows."""
+class LockedCursor:
+    """sqlite3.Cursor proxy: every access takes db._write_lock.
+
+    Each call (fetchone/step, fetchall, ...) is one lock-held critical
+    section, so no other thread can reset the shared cached statement
+    while this cursor is mid-fetch.
+    """
+
+    _UNSET = object()
+
+    def __init__(self, cursor: sqlite3.Cursor) -> None:
+        self._cursor = cursor
+
+    def fetchone(self) -> Any:
+        with _write_lock:
+            return self._cursor.fetchone()
+
+    def fetchall(self) -> list[Any]:
+        with _write_lock:
+            return self._cursor.fetchall()
+
+    def fetchmany(self, size=_UNSET) -> list[Any]:
+        with _write_lock:
+            if size is LockedCursor._UNSET:
+                return self._cursor.fetchmany()
+            return self._cursor.fetchmany(size)
+
+    def close(self) -> None:
+        with _write_lock:
+            self._cursor.close()
+
+    def __iter__(self) -> Iterator[Any]:
+        # Generator: every row fetch re-acquires the lock.
+        while True:
+            with _write_lock:
+                row = self._cursor.fetchone()
+            if row is None:
+                return
+            yield row
+
+    def __getattr__(self, name: str) -> Any:
+        # rowcount / lastrowid / description / future attributes.
+        if name == "_cursor":
+            raise AttributeError(name)
+        return getattr(self._cursor, name)
+
+
+class LockedConnection:
+    """sqlite3.Connection proxy: every access takes db._write_lock.
+
+    Threads share ONE connection (app.state.conn). Serialising all calls
+    through the module RLock (reentrant, so nested execute-under-`with conn`
+    in one thread is fine) closes the statement-cache race; SQLite is
+    single-writer anyway and this is a local single-user app.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, parameters: Sequence[Any] = ()) -> LockedCursor:
+        with _write_lock:
+            return LockedCursor(self._conn.execute(sql, parameters))
+
+    def executemany(
+        self, sql: str, seq_of_parameters: Iterable[Sequence[Any]]
+    ) -> LockedCursor:
+        with _write_lock:
+            return LockedCursor(
+                self._conn.executemany(sql, seq_of_parameters)
+            )
+
+    def commit(self) -> None:
+        with _write_lock:
+            self._conn.commit()
+
+    def rollback(self) -> None:
+        with _write_lock:
+            self._conn.rollback()
+
+    def close(self) -> None:
+        with _write_lock:
+            self._conn.close()
+
+    def cursor(self, *args: Any, **kwargs: Any) -> LockedCursor:
+        with _write_lock:
+            return LockedCursor(self._conn.cursor(*args, **kwargs))
+
+    def __enter__(self) -> LockedConnection:
+        with _write_lock:
+            self._conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
+        with _write_lock:
+            return self._conn.__exit__(exc_type, exc_value, traceback)
+
+    def __getattr__(self, name: str) -> Any:
+        # in_transaction / total_changes / executescript (init_db already
+        # holds the lock) / properties / future methods pass through.
+        if name == "_conn":
+            raise AttributeError(name)
+        return getattr(self._conn, name)
+
+
+def connect(path: str | Path) -> LockedConnection:
+    """Open the database: WAL journal, foreign keys on, Row rows.
+
+    Returns a LockedConnection so every later use from any thread is
+    serialised through the module _write_lock.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
@@ -148,7 +260,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
-    return conn
+    return LockedConnection(conn)
 
 
 def init_db(conn: sqlite3.Connection) -> None:
